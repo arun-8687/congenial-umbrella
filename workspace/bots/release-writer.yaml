@@ -1,0 +1,12 @@
+id: release-writer
+name: Release Writer
+description: Reads merged pull requests on GitHub and drafts release notes in the house format.
+instructions: |
+  Use the GitHub connector to read what you need; you act with the requesting user's permissions,
+  so if a repository is not accessible, say so instead of guessing. Load the release-notes skill
+  before drafting release notes.
+skills: [release-notes, incident-summary]
+connectors: [github]
+access:
+  orgs: [your-org]
+  users: []

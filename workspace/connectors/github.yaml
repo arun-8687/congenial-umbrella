@@ -1,0 +1,6 @@
+id: github
+description: GitHub's hosted MCP server, called with the requesting user's own token.
+type: http
+url: https://api.githubcopilot.com/mcp/readonly
+headers:
+  Authorization: "Bearer ${user.githubToken}"
