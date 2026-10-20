@@ -33,6 +33,11 @@ export const BotSpec = z
     .object({
         id: Id,
         name: z.string().min(1).max(80),
+        /** Job title shown in the roster, e.g. "Release Manager". */
+        title: z.string().min(1).max(60).optional(),
+        /** Emoji or 1-2 characters shown as the avatar. */
+        avatar: z.string().min(1).max(8).optional(),
+        color: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
         description: z.string().min(1).max(500),
         instructions: z.string().min(1),
         model: z.string().min(1).optional(),
@@ -40,13 +45,22 @@ export const BotSpec = z
         builtinTools: z.array(BuiltinTool).default([]),
         skills: z.array(Id).default([]),
         connectors: z.array(Id).default([]),
-        /** Bot ids this bot may call through `ask_bot`. */
-        canMessage: z.array(Id).default([]),
+        /** Bot ids this bot may message or hand tasks to; `"*"` means any bot the user can use. */
+        canMessage: z.array(z.union([Id, z.literal("*")])).default([]),
         access: AccessSpec.default({ users: [], orgs: [] }),
+        /**
+         * A per-user workspace (files, and shell commands when allowed) shared by all of that user's
+         * bots, like a shared cloud computer. File reads are allowed; writes and shell ask first.
+         */
+        computer: z.boolean().default(false),
+        /** Remember facts across threads with the remember/forget tools. */
+        memory: z.boolean().default(true),
         permissions: z
             .object({
                 /** Permission kinds approved automatically. Derived from the bot's tools when omitted. */
                 allow: z.array(PermissionKind).optional(),
+                /** Permission kinds that wait for the user's approval. Derived when omitted. */
+                ask: z.array(PermissionKind).optional(),
             })
             .strict()
             .default({}),
@@ -60,7 +74,20 @@ export type BotSpecInput = z.input<typeof BotSpec>;
 
 const ConnectorBase = {
     id: Id,
+    name: z.string().min(1).max(80).optional(),
     description: z.string().min(1).max(500),
+    /**
+     * A per-user credential (API key, personal token) the user enters once under Connectors.
+     * Reference it as `${user.credential}` in headers, env or args.
+     */
+    auth: z
+        .object({
+            type: z.literal("secret"),
+            label: z.string().min(1).max(80),
+            help: z.string().max(500).optional(),
+        })
+        .strict()
+        .optional(),
     /** MCP tool names to expose; omit or `["*"]` for all. */
     tools: z.array(z.string().min(1)).optional(),
     timeoutMs: z.number().int().positive().optional(),
@@ -100,15 +127,29 @@ export interface SkillSpec {
     description: string;
     /** Full SKILL.md text, frontmatter included. */
     markdown: string;
-    /** Absolute path of the skill folder, for supporting files. */
-    directory: string;
+    /** Absolute path of the skill folder, for supporting files (workspace skills only). */
+    directory?: string;
 }
 
-/** Permission kinds a bot gets when its spec does not list them explicitly. */
-export function derivedPermissions(bot: BotSpec): PermissionKind[] {
-    if (bot.permissions.allow) return bot.permissions.allow;
-    const kinds = new Set<PermissionKind>(["custom-tool"]);
-    if (bot.builtinTools.length > 0) kinds.add("url");
-    if (bot.connectors.length > 0) kinds.add("mcp");
-    return [...kinds];
+export interface PermissionPolicy {
+    allow: PermissionKind[];
+    ask: PermissionKind[];
+}
+
+/** What a bot may do without asking, and what needs the user's approval. Everything else is denied. */
+export function derivedPermissions(bot: BotSpec): PermissionPolicy {
+    const allow = new Set<PermissionKind>(["custom-tool"]);
+    const ask = new Set<PermissionKind>();
+    if (bot.builtinTools.length > 0) allow.add("url");
+    if (bot.connectors.length > 0) allow.add("mcp");
+    if (bot.computer) {
+        allow.add("read");
+        ask.add("write");
+        ask.add("shell");
+    }
+    const explicitAllow = bot.permissions.allow;
+    const explicitAsk = bot.permissions.ask;
+    const finalAllow = explicitAllow ?? [...allow];
+    const finalAsk = (explicitAsk ?? [...ask]).filter((k) => !finalAllow.includes(k));
+    return { allow: finalAllow, ask: finalAsk };
 }

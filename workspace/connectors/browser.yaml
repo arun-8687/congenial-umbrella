@@ -1,0 +1,12 @@
+id: browser
+name: Browser
+description: A real Chromium browser on your shared computer (Playwright MCP). Sign-ins persist across your bots, like a shared desktop.
+type: stdio
+command: npx
+args:
+  - "-y"
+  - "@playwright/mcp@0.0.83"
+  - "--headless"
+  - "--user-data-dir"
+  - "${user.computerDir}/.browser-profile"
+timeoutMs: 120000

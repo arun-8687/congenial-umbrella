@@ -113,3 +113,25 @@ Run through the "deeper, not bigger" template before rewriting it.
 > refusal, the budget, secret redaction, and the HTTP flow. `tsc --noEmit` must pass against the SDK's
 > types. A smoke script must start the real runtime and run one real turn when a Copilot-licensed
 > token is available.
+
+---
+
+## Round 2: parity with Grok Bot
+
+The follow-up ask was *"keep going until you achieve parity with grok bot ui and features"*. Research
+showed that **Grok Bot** is a specific xAI product (launched August 2026): persistent AI teammates with
+names and job titles, a sidebar roster, memory, bot-to-bot messages and group chats of 2–6, hand-offs,
+routines (50 per bot, 20 runs kept), skills taught by demonstration, approvals, connectors with
+reconnect, and a shared cloud computer. The refined target became:
+
+> Reproduce Grok Bot's product surface on the Copilot SDK backend, keeping the enterprise properties from
+> round 1 (per-user Copilot identity, bots as code, least privilege, bounded inter-bot traffic, audit).
+> Concretely: a persistent job queue so bots work while nobody is online; threads (DM, group, task,
+> routine) where each bot keeps one Copilot session per thread and reads only what it missed; async
+> `assign_task` hand-offs that post results back and wake the requester; `@mention` hand-offs in
+> groups with cycle and hop limits; approvals that pause only the asking bot; memory tools;
+> cron routines; skills drafted from a thread and reviewed before publishing; per-user encrypted
+> connector credentials; and a per-user shared computer. Ship a web UI matching Grok Bot's layout
+> (roster, groups, inbox, tasks, routines, skills, connectors, computer, audit), and prove it with unit
+> tests plus a browser end-to-end run against a scripted engine, with no console errors and no overflow
+> at phone width.

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { Auditor, MemoryAuditSink } from "../src/audit.js";
 import { BotSpec, derivedPermissions } from "../src/catalog/schema.js";
-import { decidePermission } from "../src/engine/policy.js";
+import { policyFor } from "../src/engine/policy.js";
 import { canUseBot, GitHubAuthenticator } from "../src/identity.js";
 import { resolvePlaceholders } from "../src/secrets.js";
 import { alice, bob, bot } from "./helpers.js";
@@ -10,17 +10,17 @@ const spec = (extra: Parameters<typeof bot>[1] = {}) => BotSpec.parse(bot("xy", 
 
 describe("permissions", () => {
     it("derives the minimum from what the bot uses", () => {
-        expect(derivedPermissions(spec())).toEqual(["custom-tool"]);
-        expect(derivedPermissions(spec({ builtinTools: ["web_fetch"], connectors: ["gh"] }))).toEqual(["custom-tool", "url", "mcp"]);
-        expect(derivedPermissions(spec({ permissions: { allow: ["read"] } }))).toEqual(["read"]);
+        expect(derivedPermissions(spec())).toEqual({ allow: ["custom-tool"], ask: [] });
+        expect(derivedPermissions(spec({ builtinTools: ["web_fetch"], connectors: ["gh"] }))).toEqual({ allow: ["custom-tool", "url", "mcp"], ask: [] });
+        expect(derivedPermissions(spec({ computer: true }))).toEqual({ allow: ["custom-tool", "read"], ask: ["write", "shell"] });
+        expect(derivedPermissions(spec({ computer: true, permissions: { allow: ["read", "shell"] } }))).toEqual({ allow: ["read", "shell"], ask: ["write"] });
     });
 
     it("denies by default, including kinds the runtime adds later", () => {
         const b = spec({ builtinTools: ["web_fetch"] });
-        expect(decidePermission(b, { kind: "url" }).decision).toBe("approve");
-        for (const kind of ["shell", "write", "read", "mcp", "memory", "something-new"]) {
-            expect(decidePermission(b, { kind }).decision).toBe("reject");
-        }
+        expect(policyFor(b, "url")).toBe("allow");
+        for (const kind of ["shell", "write", "read", "mcp", "memory", "something-new"]) expect(policyFor(b, kind)).toBe("deny");
+        expect(policyFor(spec({ computer: true }), "shell")).toBe("ask");
     });
 });
 
@@ -61,10 +61,13 @@ describe("GitHubAuthenticator", () => {
 
 describe("secrets", () => {
     it("resolves placeholders per user and fails on missing env", () => {
-        expect(resolvePlaceholders("Bearer ${user.githubToken}", alice)).toBe(`Bearer ${alice.githubToken}`);
-        expect(resolvePlaceholders("${env:FOO}-${user.login}", alice, { FOO: "bar" })).toBe("bar-alice");
-        expect(() => resolvePlaceholders("${env:NOPE}", alice, {})).toThrow(/NOPE is not set/);
-        expect(resolvePlaceholders("${unknown}", alice)).toBe("${unknown}");
+        const user = alice;
+        expect(resolvePlaceholders("Bearer ${user.githubToken}", { user })).toBe(`Bearer ${alice.githubToken}`);
+        expect(resolvePlaceholders("${env:FOO}-${user.login}", { user, env: { FOO: "bar" } })).toBe("bar-alice");
+        expect(() => resolvePlaceholders("${env:NOPE}", { user, env: {} })).toThrow(/NOPE is not set/);
+        expect(resolvePlaceholders("${unknown}", { user })).toBe("${unknown}");
+        expect(resolvePlaceholders("key=${user.credential}", { user, credential: "s3cret" })).toBe("key=s3cret");
+        expect(() => resolvePlaceholders("${user.credential}", { user })).toThrow(/not connected/);
     });
 
     it("audit records never contain tracked secrets", () => {

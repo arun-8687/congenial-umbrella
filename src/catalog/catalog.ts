@@ -149,6 +149,7 @@ function crossReferenceProblems(
         for (const s of bot.skills) if (!skills.has(s)) problems.push(`bot '${bot.id}': unknown skill '${s}'`);
         for (const c of bot.connectors) if (!connectors.has(c)) problems.push(`bot '${bot.id}': unknown connector '${c}'`);
         for (const b of bot.canMessage) {
+            if (b === "*") continue;
             if (b === bot.id) problems.push(`bot '${bot.id}': cannot list itself in canMessage`);
             else if (!bots.has(b)) problems.push(`bot '${bot.id}': canMessage references unknown bot '${b}'`);
         }

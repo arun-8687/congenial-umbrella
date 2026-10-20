@@ -1,5 +1,8 @@
 id: release-writer
 name: Release Writer
+title: Release Manager
+avatar: "📦"
+color: "#ea580c"
 description: Reads merged pull requests on GitHub and drafts release notes in the house format.
 instructions: |
   Use the GitHub connector to read what you need; you act with the requesting user's permissions,

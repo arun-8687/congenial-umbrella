@@ -3,3 +3,4 @@ dist/
 .env
 state/
 *.log
+screenshots/

@@ -2,20 +2,14 @@ import { appendFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { redact } from "./secrets.js";
 
-export type AuditEvent =
-    | { type: "conversation.created"; conversationId: string; botId: string }
-    | { type: "conversation.deleted"; conversationId: string }
-    | { type: "message.user"; conversationId: string; botId: string; text: string }
-    | { type: "message.bot"; conversationId: string; botId: string; text: string }
-    | { type: "tool.start"; botId: string; sessionId: string; tool: string; args?: unknown }
-    | { type: "tool.complete"; botId: string; sessionId: string; tool: string; success: boolean }
-    | { type: "permission"; botId: string; sessionId: string; kind: string; decision: "approve" | "reject"; detail?: string }
-    | { type: "bus.ask"; from: string; to: string; chain: string[]; message: string }
-    | { type: "bus.reply"; from: string; to: string; chain: string[]; text: string }
-    | { type: "bus.refused"; from: string; to: string; chain: string[]; reason: string }
-    | { type: "bot.saved"; botId: string }
-    | { type: "catalog.reloaded"; bots: number; connectors: number; skills: number }
-    | { type: "error"; where: string; message: string };
+/**
+ * One auditable fact. `type` is a dotted name such as `message.user`, `tool.start`, `permission`,
+ * `bus.ask`, `bus.refused`, `task.assigned`, `approval.decided`, `routine.run`, `memory.saved`.
+ */
+export interface AuditEvent {
+    type: string;
+    [field: string]: unknown;
+}
 
 export interface AuditRecord {
     ts: string;
@@ -56,8 +50,8 @@ export class MemoryAuditSink implements AuditSink {
     write(record: AuditRecord): void {
         this.records.push(record);
     }
-    events<T extends AuditEvent["type"]>(type: T): Extract<AuditEvent, { type: T }>[] {
-        return this.records.map((r) => r.event).filter((e): e is Extract<AuditEvent, { type: T }> => e.type === type);
+    events(type: string): AuditEvent[] {
+        return this.records.map((r) => r.event).filter((e) => e.type === type);
     }
 }
 

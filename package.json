@@ -12,20 +12,26 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "start": "node dist/cli.js serve",
-    "dev": "tsx src/cli.ts",
+    "start": "node --disable-warning=ExperimentalWarning dist/cli.js serve",
+    "dev": "NODE_OPTIONS=--disable-warning=ExperimentalWarning tsx src/cli.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "validate": "tsx src/cli.ts validate",
-    "smoke": "tsx scripts/smoke.ts"
+    "smoke": "tsx scripts/smoke.ts",
+    "e2e": "NODE_OPTIONS=--disable-warning=ExperimentalWarning tsx scripts/e2e.ts",
+    "demo": "ENGINE=demo DEV_LOGIN=1 ADMINS=alice NODE_OPTIONS=--disable-warning=ExperimentalWarning tsx src/cli.ts serve"
   },
   "dependencies": {
     "@github/copilot-sdk": "^1.0.23",
+    "croner": "^10.0.1",
+    "dompurify": "^3.4.17",
+    "marked": "^18.1.1",
     "yaml": "^2.8.1",
     "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/node": "^22.20.5",
+    "playwright-core": "^1.56.1",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3",
     "vitest": "^3.2.4"
