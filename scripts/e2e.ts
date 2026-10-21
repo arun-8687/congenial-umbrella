@@ -6,6 +6,7 @@
  *   npm run e2e                 # screenshots land in ./screenshots
  *   E2E_HEADED=1 npm run e2e    # watch it
  */
+import { existsSync } from "node:fs";
 import { mkdtemp, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -25,7 +26,9 @@ const app = await buildApp(config, { engine: new DemoEngine(8) });
 await new Promise<void>((r) => app.server.listen(0, "127.0.0.1", r));
 const base = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
 
-const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH ?? "/opt/pw-browsers/chromium", headless: !process.env.E2E_HEADED });
+// CHROMIUM_PATH, else the preinstalled browser, else Playwright's own (`npx playwright-core install chromium`).
+const executablePath = process.env.CHROMIUM_PATH ?? (existsSync("/opt/pw-browsers/chromium") ? "/opt/pw-browsers/chromium" : undefined);
+const browser = await chromium.launch({ executablePath, headless: !process.env.E2E_HEADED });
 const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: "dark" });
 const page = await context.newPage();
 const errors: string[] = [];
