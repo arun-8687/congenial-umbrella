@@ -25,6 +25,10 @@ const Env = z.object({
     ALLOW_PRIVATE_NETWORK: flag,
     COMPUTER_SHELL_ISOLATED: flag,
     SECRET_KEY_PREVIOUS: z.string().optional(),
+    MODEL_PROVIDER: z.enum(["openai", "azure", "anthropic"]).optional(),
+    MODEL_PROVIDER_URL: z.string().url().optional(),
+    MODEL_PROVIDER_API_KEY: z.string().optional(),
+    MODEL_PROVIDER_WIRE_API: z.enum(["completions", "responses"]).optional(),
     SHARE_TTL_DAYS: z.coerce.number().int().min(1).max(3650).default(30),
     MAX_STORAGE_MB: z.coerce.number().int().min(1).default(1024),
     TURN_TIMEOUT_MS: z.coerce.number().int().positive().default(600_000),
@@ -55,6 +59,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
             "COMPUTER_ACCESS=shell runs bot commands as the platform's own OS user, which can read its database and keys. " +
                 "Only enable it when the Copilot runtime is isolated per user (separate container or sandbox), then set COMPUTER_SHELL_ISOLATED=1.",
         );
+    }
+    if (e.MODEL_PROVIDER && (!e.MODEL_PROVIDER_URL || !e.DEFAULT_MODEL)) {
+        throw new Error("MODEL_PROVIDER needs MODEL_PROVIDER_URL and DEFAULT_MODEL.");
     }
     if (e.GITHUB_OAUTH_CLIENT_ID && !e.PUBLIC_URL) {
         throw new Error("GitHub OAuth needs PUBLIC_URL, so the callback URL never comes from a request's Host header.");
@@ -90,6 +97,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
                 : undefined,
         secretKey: e.SECRET_KEY,
         secretKeyPrevious: e.SECRET_KEY_PREVIOUS,
+        provider:
+            e.MODEL_PROVIDER && e.MODEL_PROVIDER_URL
+                ? {
+                      type: e.MODEL_PROVIDER,
+                      baseUrl: e.MODEL_PROVIDER_URL,
+                      ...(e.MODEL_PROVIDER_API_KEY ? { apiKey: e.MODEL_PROVIDER_API_KEY } : {}),
+                      ...(e.MODEL_PROVIDER_WIRE_API ? { wireApi: e.MODEL_PROVIDER_WIRE_API } : {}),
+                  }
+                : undefined,
         shareTtlDays: e.SHARE_TTL_DAYS,
         maxStorageBytes: e.MAX_STORAGE_MB * 1024 * 1024,
         devLogin: e.DEV_LOGIN,

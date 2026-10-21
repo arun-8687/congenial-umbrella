@@ -69,8 +69,9 @@ describe("CopilotEngine.sessionConfig", () => {
 
         const sys = config.systemMessage as { mode: string; sections: Record<string, { action: string; content?: string }>; content: string };
         expect(sys.mode).toBe("customize");
-        expect(sys.sections.preamble?.content).toMatch(/^You are Full, the Analyst, an AI teammate on Acme's bot platform\./);
+        expect(sys.sections.identity?.content).toMatch(/^You are Full, the Analyst, an AI teammate on Acme's bot platform\./);
         expect(sys.sections.safety).toBeUndefined();
+        // A computer bot keeps the runtime's own instructions and adds ours as `content`.
         expect(sys.content).toBe("You are full.\n\nMemory: likes tea");
     });
 
@@ -90,8 +91,11 @@ describe("CopilotEngine.sessionConfig", () => {
         expect(config.mcpServers).toEqual({});
         expect(config.enableSkills).toBe(false);
         expect(config.workingDirectory).toBeUndefined();
-        const sys = config.systemMessage as { sections: Record<string, { action: string }> };
+        const sys = config.systemMessage as { sections: Record<string, { action: string; content?: string }>; content?: string };
         expect(sys.sections.code_change_rules?.action).toBe("remove");
+        // Chat bots: instructions live in the replaced runtime section (the runtime drops `content` then).
+        expect(sys.sections.runtime_instructions).toEqual({ action: "replace", content: "You are bare." });
+        expect(sys.content).toBeUndefined();
     });
 
     it("routes every permission request through the platform's decision and reports it", async () => {

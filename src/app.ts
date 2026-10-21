@@ -38,12 +38,19 @@ export async function buildApp(config: Config, overrides: AppOverrides = {}): Pr
     const sink = overrides.auditSink ?? new JsonlAuditSink(config.auditDir);
     const audit = new Auditor(sink);
     for (const value of connectorEnvSecrets(catalog)) audit.trackSecret(value);
+    if (config.provider?.apiKey) audit.trackSecret(config.provider.apiKey);
 
     const engine =
         overrides.engine ??
         (config.engine === "demo"
             ? new DemoEngine()
-            : new CopilotEngine({ baseDirectory: config.copilotHome, defaultModel: config.defaultModel, orgName: config.orgName, logLevel: config.copilotLogLevel }));
+            : new CopilotEngine({
+                  baseDirectory: config.copilotHome,
+                  defaultModel: config.defaultModel,
+                  orgName: config.orgName,
+                  logLevel: config.copilotLogLevel,
+                  provider: config.provider,
+              }));
     await engine.start();
 
     const authenticator = overrides.authenticator ?? new GitHubAuthenticator(config.githubApiUrl);

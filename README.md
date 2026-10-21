@@ -41,6 +41,12 @@ share bots by org. `docker build -t copilot-bots .` gives a production image (st
 `GITHUB_TOKEN=$(gh auth token) npm run smoke` boots the Copilot runtime and runs a real turn plus a real
 bot-to-bot hop.
 
+**Bring your own model.** To run bots on your own model endpoint instead of GitHub Copilot's models,
+set `MODEL_PROVIDER` and `MODEL_PROVIDER_URL`. Endpoints can be OpenAI-compatible (an internal gateway,
+vLLM, Ollama), Azure OpenAI, or Anthropic. Also set `MODEL_PROVIDER_API_KEY` and `DEFAULT_MODEL`.
+Inference is then billed to that provider. Everything else stays the same, including connectors that
+use the person's GitHub token.
+
 ## Parity with Grok Bot
 
 Grok Bot's feature list comes from xAI's launch coverage:
@@ -160,7 +166,8 @@ jobs that post into a routine thread.
 | `SECRET_KEY` | generated in `STATE_DIR` | base64 32 bytes; seals tokens and credentials |
 | `MAX_HOPS`, `MAX_BOT_CALLS`, `CONCURRENCY`, `MAX_PER_USER` | `3`, `12`, `4`, `2` | `MAX_PER_USER` keeps one person from starving others |
 | `COMPUTER_ACCESS` | `off` | `files` (file tools confined to each user's workspace) or `shell` |
-| `ALLOW_PRIVATE_NETWORK` | off | let bots fetch private/internal addresses |
+| `ALLOW_PRIVATE_NETWORK` | off | turn off the platform's own private-address guard (the Copilot runtime keeps its own) |
+| `MODEL_PROVIDER`, `MODEL_PROVIDER_URL`, `MODEL_PROVIDER_API_KEY`, `MODEL_PROVIDER_WIRE_API` | | bring your own model: `openai`, `azure` or `anthropic` |
 | `COMPUTER_SHELL_ISOLATED` | off | required with `COMPUTER_ACCESS=shell`: confirms each user's runtime is isolated |
 | `SECRET_KEY_PREVIOUS` | | old key during a rotation (`copilot-bots rotate-key`) |
 | `SHARE_TTL_DAYS`, `MAX_STORAGE_MB` | `30`, `1024` | share-link lifetime; per-user upload storage |
@@ -176,7 +183,7 @@ untrusted (bots read untrusted content and can be prompt-injected), and narrows 
 | --- | --- |
 | A bot reads host files (other users' data, `secret.key`, the DB) | No computer unless `COMPUTER_ACCESS` allows it. Every read/write path, after resolving symlinks, must be inside that user's workspace or it is refused. Missing paths are refused. |
 | A bot runs arbitrary commands | Shell only with `COMPUTER_ACCESS=shell`, and each command asks the user unless they chose "always allow" for their own bot. Enable it only where each user's runtime is isolated. |
-| SSRF to cloud metadata or internal services | `web_fetch` URLs are resolved and refused if any address is loopback, private, link-local, CGNAT or multicast (opt out with `ALLOW_PRIVATE_NETWORK`). Per-bot `allowedDomains` narrows further. DNS rebinding remains possible, so also restrict egress at the network layer. |
+| SSRF to cloud metadata or internal services | Two independent layers, both tested against the real runtime. The platform resolves each `web_fetch` URL at the permission request and refuses (and audits) any loopback, private, link-local, CGNAT or multicast address. Separately, the Copilot runtime refuses the same ranges when it connects, which also defeats DNS rebinding. Per-bot `allowedDomains` narrows further. The stdio connectors you configure (such as the browser) have no such guard, so restrict their egress at the network layer. |
 | Exfiltration through rendered output | Remote images in bot Markdown are never loaded (rewritten during sanitizing, and blocked by `img-src 'self'`). The E2E run asserts the browser makes no off-origin requests at all. |
 | Connector write actions | Non-read-only MCP tools ask the user by default (`requireApproval`). |
 | Shared org credentials | Connectors with `${env:...}` secrets are org-bot-only unless granted. |
@@ -196,10 +203,17 @@ untrusted (bots read untrusted content and can be prompt-injected), and narrows 
 ## Tests
 
 ```bash
-npm test          # 93 unit + HTTP tests (fake engine, in-memory SQLite)
+npm test          # 104 tests, about 4 seconds: unit, HTTP, and the real Copilot runtime (below)
 npm run e2e       # drives Chromium through every screen in demo mode → ./screenshots
 npm run typecheck # against the SDK's shipped .d.ts
 ```
+
+`test/real-runtime.test.ts` drives the **real Copilot runtime binary** through the platform. Only the
+model is replaced, by a scripted OpenAI-compatible server (`test/support/fake-model.ts`) plugged in as a
+BYOK provider. So tool exposure, the runtime's own permission requests, built-in file, shell and web
+tools, real MCP servers (`test/support/fake-mcp.mjs`), skills, streaming, resumed history, approvals
+and Stop are all exercised for real. The tests also assert exactly what reaches the model: the system
+prompt and the tool list.
 
 The E2E run fails on any console error (including CSP violations), horizontal overflow at phone width,
 any off-origin request, or Trusted Types not being enforced. The security suites were checked by
@@ -207,12 +221,13 @@ mutation: removing each guard makes a test fail.
 
 ## Known limits
 
-- **Not verified against a live model.** These parts are covered by types, mocks and `npm run smoke`,
-  but haven't been seen working end to end against a real Copilot session:
-  - the Copilot engine path itself;
-  - the runtime asking permission for every URL and file it touches;
-  - MCP servers' read-only hints, which drive connector approvals.
-  Run the smoke test with a licensed token before relying on them.
+- **Copilot-hosted models are the one path not run here.** The real-runtime tests use a BYOK provider,
+  because this repository's CI has no Copilot seat. Turns on GitHub's models differ only in
+  authentication (`gitHubTokenProvider`) and in the `web_search` tool, which needs Copilot.
+  `GITHUB_TOKEN=... npm run smoke` covers both.
+- **Tool names depend on the model family.** The runtime offers GPT-5 `create`/`edit`/`grep`, GPT-4o
+  `apply_patch`/`rg`, and Claude `str_replace_editor`. The platform allows all of them, and the
+  permission policy, not the tool name, decides what runs.
 - **Rate limits are per process and see the socket address.** Behind a reverse proxy every client
   shares the proxy's IP for the sign-in limiter, so put per-client limits at the proxy as well.
 - **Audit chain:** the chain proves records weren't edited in place. Someone who can rewrite the whole
@@ -224,7 +239,7 @@ mutation: removing each guard makes a test fail.
   the SDK's `sessionFs` provider, before scaling out.
 - **Tokens:** routines run with the user's last-seen token. When it expires, the run fails and the user
   is notified; they need to sign in again.
-- **Live verification:** the live Copilot path is covered by type checks and `npm run smoke`. Model
-  behaviour (tool choice, hand-off judgement) needs evaluation against your own prompts.
+- **Model judgement isn't tested.** The scripted model proves the plumbing, not whether a real model
+  picks the right tool or teammate. Evaluate that with your own prompts and model.
 
 See [docs/PROMPT.md](docs/PROMPT.md) for the refined spec this was built from.
