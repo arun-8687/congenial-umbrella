@@ -118,6 +118,16 @@ export class CopilotEngine implements AgentEngine {
                         success: event.data.success,
                     });
                     break;
+                case "assistant.usage":
+                    emit({
+                        type: "usage",
+                        model: event.data.model,
+                        inputTokens: event.data.inputTokens ?? 0,
+                        outputTokens: event.data.outputTokens ?? 0,
+                        premiumRequests: event.data.isByok ? 0 : (event.data.cost ?? 0),
+                        durationMs: event.data.duration ?? 0,
+                    });
+                    break;
             }
         });
 

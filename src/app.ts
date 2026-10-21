@@ -62,6 +62,10 @@ export async function buildApp(config: Config, overrides: AppOverrides = {}): Pr
         maxPerUser: config.maxPerUser,
         computerAccess: config.computerAccess,
         allowPrivateNetwork: config.allowPrivateNetwork,
+        dailyPremiumRequests: config.dailyPremiumRequests,
+        dailyTokens: config.dailyTokens,
+        usageRetentionDays: config.usageRetentionDays,
+        publicUrl: config.publicUrl,
         // Background work re-checks the user's token and org membership before running as them.
         verifyUser: (u) => (config.devLogin && u.githubToken.startsWith("dev-token-") ? Promise.resolve(u) : authenticator.authenticate(u.githubToken)),
         turnTimeoutMs: config.turnTimeoutMs,

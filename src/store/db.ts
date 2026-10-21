@@ -48,7 +48,7 @@ export class Db {
 
     private migrate(): void {
         const version = (this.get<{ user_version: number }>("PRAGMA user_version")?.user_version ?? 0);
-        const steps = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3];
+        const steps = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4];
         for (let v = version; v < steps.length; v++) {
             this.tx(() => {
                 this.sql.exec(steps[v]!);
@@ -269,4 +269,54 @@ ALTER TABLE memories ADD COLUMN source TEXT NOT NULL DEFAULT 'user';
 ALTER TABLE share_links ADD COLUMN expires_at TEXT;
 -- Earlier links never expired and stored their token in the clear; revoke them.
 DELETE FROM share_links;
+`;
+
+/** v4: webhook triggers and result delivery for routines, usage metering, platform API tokens. */
+const SCHEMA_V4 = `
+ALTER TABLE routines ADD COLUMN hook_id TEXT;
+ALTER TABLE routines ADD COLUMN hook_secret TEXT;
+ALTER TABLE routines ADD COLUMN hook_events TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE routines ADD COLUMN delivery TEXT;
+CREATE UNIQUE INDEX routines_hook ON routines(hook_id) WHERE hook_id IS NOT NULL;
+ALTER TABLE routine_runs ADD COLUMN trigger_detail TEXT;
+ALTER TABLE routine_runs ADD COLUMN delivery_status TEXT;
+
+CREATE TABLE hook_deliveries (
+    routine_id TEXT NOT NULL REFERENCES routines(id) ON DELETE CASCADE,
+    delivery_id TEXT NOT NULL,
+    received_at TEXT NOT NULL,
+    PRIMARY KEY (routine_id, delivery_id)
+);
+
+CREATE TABLE usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner TEXT NOT NULL,
+    bot_id TEXT NOT NULL,
+    thread_id TEXT,
+    source TEXT NOT NULL,
+    model TEXT,
+    calls INTEGER NOT NULL DEFAULT 0,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    premium_requests REAL NOT NULL DEFAULT 0,
+    tool_calls INTEGER NOT NULL DEFAULT 0,
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    ok INTEGER NOT NULL DEFAULT 1,
+    day TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX usage_day ON usage(day);
+CREATE INDEX usage_owner_day ON usage(owner, day);
+
+CREATE TABLE api_tokens (
+    id TEXT PRIMARY KEY,
+    owner TEXT NOT NULL,
+    name TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    scopes TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT,
+    last_used_at TEXT
+);
+CREATE INDEX api_tokens_owner ON api_tokens(owner);
 `;

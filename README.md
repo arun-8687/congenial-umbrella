@@ -14,6 +14,7 @@ and ask before doing anything risky. Every turn runs **as the person asking, on 
 | ![Approval request](docs/screenshots/06-approval-requested.png) | ![Group chat hand-off](docs/screenshots/09-group-chat.png) |
 | ![New bot from a role template](docs/screenshots/03-new-bot-template.png) | ![Tasks board](docs/screenshots/13-tasks.png) |
 | ![Routines](docs/screenshots/14-routines.png) | ![Audit log](docs/screenshots/19-audit-log.png) |
+| ![Webhook-triggered routine](docs/screenshots/routine-webhook.png) | ![Org usage dashboard](docs/screenshots/admin-usage.png) |
 
 ## Try it in 30 seconds (no Copilot seat needed)
 
@@ -57,7 +58,7 @@ and the [Oct 2026 grok.com notes](https://releases.sh/xai/grok.md).
 | Grok Bot | Copilot Bots |
 | --- | --- |
 | Roster of named bots with job titles, in a sidebar "Bots" section | ✅ Sidebar roster with avatar, job title, live status (working / waiting for you), unread counts |
-| Create a bot from a name, a job and a description; role templates in a tab strip | ✅ New-bot dialog with 8 role templates (Chief of Staff, Researcher, Release Manager, PR Reviewer, Bug Reproduction, Incident Commander, Docs Writer, Data Analyst) |
+| Create a bot from a name, a job and a description; role templates in a tab strip | ✅ New-bot dialog with 10 role templates (Chief of Staff, Researcher, Release Manager, PR Reviewer, CI Doctor, On-call Triage, Bug Reproduction, Incident Commander, Docs Writer, Data Analyst) |
 | Message it like a coworker; it keeps working when you close the app | ✅ Persistent job queue (SQLite). Bots run server-side; interrupted turns resume after a restart |
 | Memory across conversations (user, bot) | ✅ `remember` / `forget` tools; user-level and per-bot memory, editable in Settings |
 | Bots message each other, share group chats (2–6), and hand off ownership | ✅ `ask_bot` (sync), `assign_task` (async, own task thread, result posted back and the requester woken), group chats of 2–6 with `@mention` hand-offs |
@@ -85,6 +86,86 @@ Beyond Grok Bot, because this is for enterprises:
 - **Prompt-injection hygiene.** Tool output and other bots' messages are marked as data, and bot
   messages carry `source: "agent-<id>"`. The usual exfiltration channels are closed (see below).
 - **Data rights.** "Delete my data" removes everything stored for a person except the audit trail.
+
+## For engineering teams
+
+Bots are most useful when they're wired into the tools a team already uses. These features close the
+loop between the platform and GitHub, CI, chat and billing.
+
+**Webhook-triggered routines.** Any routine can be started by a webhook (GitHub, CI, alerting). In
+*Routines → Triggers & delivery*, turn the webhook on, then paste its URL and secret into GitHub's
+*Settings → Webhooks*. Filters choose which events run it:
+
+```text
+pull_request.opened                                        # new PRs → PR Reviewer
+workflow_run.completed?workflow_run.conclusion=failure|timed_out   # red CI → CI Doctor
+issues.labeled?label.name=bug                             # bug triage
+```
+
+GitHub's `X-Hub-Signature-256` is verified in constant time. Senders that can't sign send
+`Authorization: Bearer <secret>` and name the event with `X-Event-Type`. Redeliveries with the same
+delivery id run once, and `ping` is answered without a run. The payload reaches the bot compacted:
+API URLs, node ids and nested repository objects are dropped, and people become their login. It is
+JSON-encoded inside a fenced block labelled as data, so text in a PR body can't pose as instructions.
+Runs still execute as the routine's owner, under their approvals and budget.
+
+**Results posted to Slack or Teams.** Each run's result (or failure) can be posted to a Slack incoming
+webhook, a Microsoft Teams workflow (as an Adaptive Card) or any JSON endpoint. The URL is sealed at
+rest and only its host is ever shown. It must be https and pass the SSRF guard, both when saved and
+when sent, and redirects aren't followed. Bot output is escaped so it can't `@channel` anyone.
+
+**API tokens and `copilot-bots ask` for CI.** Under *Settings → API tokens*, create a token with
+scopes `ask`, `read` and/or `write`:
+- `ask` covers one-shot asks, running routines and reading their results.
+- No scope can manage tokens, delete the account, touch credentials or reach admin endpoints.
+- Tokens are stored as hashes, expire, and stop working when the owner's GitHub sign-in does.
+
+```yaml
+# .github/workflows/review.yml
+- run: git diff origin/${{ github.base_ref }}... | npx copilot-bots ask pr-reviewer "Review this diff. Most severe findings first."
+  env:
+    COPILOT_BOTS_URL: https://bots.example.com
+    COPILOT_BOTS_TOKEN: ${{ secrets.COPILOT_BOTS_TOKEN }}
+```
+
+Here `pr-reviewer` is an org bot defined in `workspace/bots/`, so its id is stable. `POST /api/bots/<id>/ask` runs the request as a task and waits for the result (`timeoutSec`, up to 10
+minutes). If the bot needs a person's approval first, it returns `202` with the task to poll. The CLI
+exits with 0 when the task is done, 1 when it failed, and 3 when it is still waiting.
+
+**Bot evals in CI.** Regression cases live next to the bots in `workspace/evals/*.yaml`, and
+`copilot-bots eval --junit reports/evals.xml` runs them. A change to a bot's instructions, model,
+skills or connectors is then tested like code.
+
+```yaml
+bot: concierge
+cases:
+  - name: answers simple questions itself
+    prompt: What is 12 times 12? Reply with just the number.
+    expect: { contains: ["144"], noTools: [ask_bot] }
+  - name: asks before closing tickets
+    prompt: Close ticket 7
+    expect: { asksApproval: true }      # approvals are denied unless `approve: true`
+```
+
+Expectations can check:
+- reply content: `contains`, `notContains` and `matches` (regex);
+- tool use: `tools`, `noTools` (both take `prefix*`) and `maxToolCalls`;
+- approvals: `asksApproval`.
+
+Each case runs in a fresh thread through the full runtime. Approval requests are answered automatically
+(denied unless the case sets `approve: true`). Evals use `EVAL_GITHUB_TOKEN` against Copilot, or no
+seat at all with `MODEL_PROVIDER`.
+
+**Usage and budgets.** Every turn records its model, model calls, tokens, Copilot premium requests,
+tool calls, duration, outcome and source (chat, task, routine, API, bot-to-bot).
+- People see their own usage under Settings.
+- Admins see the whole organization under *Admin → Usage*: per day, person, bot, model and source.
+- `DAILY_PREMIUM_REQUESTS` and `DAILY_TOKENS` cap each person per UTC day. A capped person's bots stop
+  with a clear message instead of running up the bill.
+- "Delete my data" keeps the usage numbers for chargeback, but removes the person's login from them.
+
+**Engineering templates.** PR Reviewer, CI Doctor, On-call Triage, Bug Reproduction, Release Manager
+and Incident Commander. Each template's tip says which webhook filter and delivery to wire it to.
 
 Grok Bot features not reproduced: recording a screen demo to create a skill (here you teach from a
 thread instead), live remote control of the agent computer for typing passwords, and model-based "Auto
@@ -172,6 +253,9 @@ jobs that post into a routine thread.
 | `SECRET_KEY_PREVIOUS` | | old key during a rotation (`copilot-bots rotate-key`) |
 | `SHARE_TTL_DAYS`, `MAX_STORAGE_MB` | `30`, `1024` | share-link lifetime; per-user upload storage |
 | `TURN_TIMEOUT_MS`, `APPROVAL_TIMEOUT_MS` | 10 min, 30 min | |
+| `DAILY_PREMIUM_REQUESTS`, `DAILY_TOKENS` | `0` (no limit) | per-person daily budgets, reset at 00:00 UTC |
+| `USAGE_RETENTION_DAYS` | `400` | how long usage records are kept |
+| `EVAL_GITHUB_TOKEN` | | `copilot-bots eval`: whose Copilot seat and connectors the evals use |
 | `DEV_LOGIN` | off | demo only; refused with `ENGINE=copilot` |
 
 ## Security model
@@ -198,12 +282,17 @@ untrusted (bots read untrusted content and can be prompt-injected), and narrows 
 | Share links | Stored as hashes, expire after `SHARE_TTL_DAYS`, and show only the conversation (no approvals, tool arguments, attachments or ids). |
 | Unsafe configurations | Startup refuses `DEV_LOGIN` off localhost, shell mode without `COMPUTER_SHELL_ISOLATED=1`, and OAuth without `PUBLIC_URL`. |
 | Secrets at rest / in logs | Tokens and credentials are sealed with AES-256-GCM in a 0700 state directory; `SECRET_KEY_PREVIOUS` + `copilot-bots rotate-key` rotate the key. Known secrets are redacted from the audit log and error logs. |
+| Forged or replayed webhooks | HMAC (`X-Hub-Signature-256`) or bearer secret, compared in constant time. Unknown hooks and bad signatures get the same 401. Delivery ids are deduplicated for 7 days. Secrets are sealed at rest, shown once, and rotatable. Deliveries are rate-limited per hook and per IP, capped at 2 MB, and refused when the owner's queue is full. |
+| Webhook payloads steering the bot | The payload is compacted, JSON-encoded inside a fence whose delimiters it can't contain, and labelled as data. The run has only the owner's bot policy, so approvals still gate writes, shell and connector actions. |
+| Result delivery as an SSRF or exfiltration channel | https only, with no credentials in the URL. The private-address guard runs at save and at send, redirects aren't followed, there's a 10 s timeout, and the response is never read back into the bot. Webhook URLs are sealed and redacted from logs. Slack mentions in bot output are escaped. |
+| Leaked API tokens | Hashed at rest (`cbp_` prefix, so secret scanners can find them) and scoped. They expire, can be revoked, and die with the owner's GitHub sign-in. They can't mint tokens, delete the account, set credentials or use admin endpoints, and `ask` can't read conversations. Long-polling asks are capped per person. |
+| Runaway spend | Per-person daily premium-request and token budgets, checked before every turn (chat, tasks, routines, webhooks, API and bot-to-bot). Every model call is metered for the admin view. |
 | Audit integrity | Each audit record is hash-chained to the previous one, across days; `copilot-bots verify-audit` detects edited, removed or reordered records and deleted days. |
 
 ## Tests
 
 ```bash
-npm test          # 104 tests, about 4 seconds: unit, HTTP, and the real Copilot runtime (below)
+npm test          # 131 tests: unit, HTTP, and the real Copilot runtime (below)
 npm run e2e       # drives Chromium through every screen in demo mode → ./screenshots
 npm run typecheck # against the SDK's shipped .d.ts
 ```
@@ -239,7 +328,12 @@ mutation: removing each guard makes a test fail.
   the SDK's `sessionFs` provider, before scaling out.
 - **Tokens:** routines run with the user's last-seen token. When it expires, the run fails and the user
   is notified; they need to sign in again.
-- **Model judgement isn't tested.** The scripted model proves the plumbing, not whether a real model
-  picks the right tool or teammate. Evaluate that with your own prompts and model.
+- **Model judgement is yours to test.** The scripted model proves the plumbing, not whether a real model
+  picks the right tool or teammate. Write evals (`workspace/evals/`) for the behaviour you rely on and
+  run them in CI against your model.
+- **Bearer-secret webhooks can be replayed** by anyone who captured a request, unless the sender
+  includes a delivery id (`Idempotency-Key`, `X-Request-Id`). Prefer signed GitHub-style deliveries.
+- **Delivery DNS:** the SSRF check on result delivery resolves the host before the request, so DNS
+  rebinding between the two isn't prevented. Restrict egress at the network layer if that matters.
 
 See [docs/PROMPT.md](docs/PROMPT.md) for the refined spec this was built from.

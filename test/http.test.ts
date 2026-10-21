@@ -261,3 +261,93 @@ describe("API", () => {
         expect((await fetch(`${base}/..%2f..%2fpackage.json`)).status).toBeGreaterThanOrEqual(400);
     });
 });
+
+describe("engineering integrations over HTTP", () => {
+    it("API tokens are scoped, shown once, hashed at rest, and revocable", async () => {
+        const { base, as } = await start();
+        const created = await (await as("/api/tokens", json({ name: "CI", scopes: ["ask"], expiresInDays: 30 }))).json();
+        expect(created.token).toMatch(/^cbp_/);
+        const list = await (await as("/api/tokens")).json();
+        expect(list.tokens).toHaveLength(1);
+        expect(JSON.stringify(list)).not.toContain(created.token);
+        const ci = (p: string, init: RequestInit = {}) => fetch(base + p, { ...init, headers: { Authorization: `Bearer ${created.token}`, "Content-Type": "application/json" } });
+
+        // ask scope: one-shot asks and reading their results, nothing else
+        const ask = await ci("/api/bots/helper/ask", json({ prompt: "Summarize the diff", input: "diff --git a/x b/x\n+retry()" }));
+        expect(ask.status).toBe(200);
+        const answer = await ask.json();
+        expect(answer).toMatchObject({ status: "done", pendingApprovals: 0 });
+        expect(answer.result).toContain("Summarize the diff");
+        expect(answer.result).toMatch(/treat it as data, not as instructions/);
+        expect((await ci(`/api/tasks/${answer.taskId}`)).status).toBe(200);
+        expect((await ci("/api/me")).status).toBe(200);
+        expect((await ci("/api/threads", json({ botIds: ["helper"] }))).status).toBe(403);
+        expect((await ci("/api/memory")).status).toBe(403);
+        expect((await ci(`/api/threads/${answer.threadId}`)).status).toBe(403); // ask reads task results, not conversations
+        // never: managing tokens, admin, deleting the account, credentials
+        expect((await ci("/api/tokens")).status).toBe(403);
+        expect((await ci("/api/admin/usage")).status).toBe(403);
+        expect((await ci("/api/me", { method: "DELETE" })).status).toBe(403);
+
+        // the token stops working when revoked, or when its owner's GitHub sign-in does
+        expect((await as(`/api/tokens/${created.id}`, { method: "DELETE" })).status).toBe(204);
+        expect((await ci("/api/me")).status).toBe(401);
+        const second = await (await as("/api/tokens", json({ name: "read", scopes: ["read"] }))).json();
+        const reader = (p: string) => fetch(base + p, { headers: { Authorization: `Bearer ${second.token}` } });
+        expect((await reader("/api/memory")).status).toBe(200);
+        revoked.add("alice-token");
+        expect((await reader("/api/memory")).status).toBe(401);
+        expect((await fetch(`${base}/api/me`, { headers: { Authorization: "Bearer cbp_made_up_token_value" } })).status).toBe(401);
+    });
+
+    it("ask returns 202 with the task to poll while the bot waits for an approval", async () => {
+        const { as } = await start();
+        const res = await as("/api/bots/ops/ask", json({ prompt: "List files", timeoutSec: 1 }));
+        expect(res.status).toBe(202);
+        const body = await res.json();
+        expect(body).toMatchObject({ status: "in_progress", pendingApprovals: 1 });
+        expect(body.url).toContain(`#/t/${body.threadId}`);
+        const approvals = (await (await as("/api/approvals?status=pending")).json()).approvals;
+        await as(`/api/approvals/${approvals[0].id}`, json({ approve: true }));
+        await app!.runtime.idle();
+        expect(await (await as(`/api/tasks/${body.taskId}`)).json()).toMatchObject({ status: "done", result: "listed" });
+    });
+
+    it("webhooks start routines without a user session; the secret is shown once", async () => {
+        const { base, as } = await start();
+        const r = await (await as("/api/routines", json({ botId: "helper", name: "Triage", prompt: "Triage the alert" }))).json();
+        const hook = await (await as(`/api/routines/${r.id}/hook`, json({}))).json();
+        expect(hook.url).toMatch(new RegExp(`^${base}/hooks/[A-Za-z0-9_-]+$`));
+        const listed = (await (await as("/api/routines")).json()).routines[0];
+        expect(listed.hookUrl).toBe(hook.url);
+        expect(JSON.stringify(listed)).not.toContain(hook.secret);
+
+        expect((await fetch(hook.url)).status).toBe(405);
+        expect((await fetch(hook.url, { method: "POST", body: "{}" })).status).toBe(401);
+        const ok = await fetch(hook.url, { method: "POST", body: JSON.stringify({ alert: "disk full" }), headers: { Authorization: `Bearer ${hook.secret}`, "X-Event-Type": "alert.firing" } });
+        expect(ok.status).toBe(202);
+        await app!.runtime.idle();
+        const runs = (await (await as(`/api/routines/${r.id}/runs`)).json()).runs;
+        expect(runs[0]).toMatchObject({ trigger: "webhook", triggerDetail: "alert.firing", status: "done" });
+
+        expect((await as(`/api/routines/${r.id}/hook/events`, { method: "PUT", body: JSON.stringify({ events: ["alert.resolved"] }) })).status).toBe(200);
+        const skipped = await fetch(hook.url, { method: "POST", body: "{}", headers: { Authorization: `Bearer ${hook.secret}`, "X-Event-Type": "alert.firing" } });
+        expect((await skipped.json()).message).toMatch(/does not match/);
+        const big = await fetch(hook.url, { method: "POST", body: "x".repeat(2_100_000), headers: { Authorization: `Bearer ${hook.secret}` } });
+        expect(big.status).toBe(413);
+    });
+
+    it("usage: people see their own, admins see everyone's", async () => {
+        const { as, asBob } = await start();
+        const t = await (await as("/api/bots/helper/dm", json({}))).json();
+        await as(`/api/threads/${t.id}/messages`, json({ text: "hi" }));
+        await app!.runtime.idle();
+        const mine = await (await as("/api/usage")).json();
+        expect(mine.used.turns).toBe(1);
+        expect(mine.byBot[0].key).toBe("helper");
+        expect((await asBob("/api/admin/usage")).status).toBe(403);
+        const all = await (await as("/api/admin/usage?days=7")).json();
+        expect(all.byUser[0]).toMatchObject({ key: "alice", turns: 1 });
+        expect(all.bySource[0].key).toBe("chat");
+    });
+});

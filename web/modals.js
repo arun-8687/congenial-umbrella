@@ -99,6 +99,7 @@ async function botForm(title, initial, onSave, withTemplates) {
         };
         return spec;
     };
+    const tip = h("div.template-tip");
     function drawPreview() {
         const s = { name: f.name.value || "New bot", avatar: f.avatar.value, color: f.color.value };
         clear(preview, h("div", { style: { display: "flex", gap: "12px", alignItems: "center" } }, avatar(s, "lg"), h("div", h("div", { style: { fontWeight: 650, fontSize: "17px" } }, s.name), h("div.muted", f.title.value || "Job title"))));
@@ -109,8 +110,8 @@ async function botForm(title, initial, onSave, withTemplates) {
         ? h(
               "div.template-strip",
               { role: "tablist", "aria-label": "Start from a role" },
-              h("button.chip.on", { type: "button", onClick: (e) => { pick(e.target); set(initial); } }, "Blank"),
-              S.templates.map((t) => h("button.chip", { type: "button", onClick: (e) => { pick(e.target); set({ ...initial, ...t.bot }); } }, t.label)),
+              h("button.chip.on", { type: "button", onClick: (e) => { pick(e.target); set(initial); clear(tip); } }, "Blank"),
+              S.templates.map((t) => h("button.chip", { type: "button", onClick: (e) => { pick(e.target); set({ ...initial, ...t.bot }); clear(tip, t.tip ? [icon("sparkle"), h("span", t.tip)] : null); } }, t.label)),
           )
         : null;
     function pick(btn) {
@@ -120,6 +121,7 @@ async function botForm(title, initial, onSave, withTemplates) {
     const body = h(
         "div.form",
         strip,
+        tip,
         preview,
         h("div.row", h("label.field", "Name", f.name), h("label.field", "Job title", f.title)),
         h("div", { style: { display: "flex", gap: "12px", alignItems: "end" } }, h("label.field", "Avatar", f.avatar), h("label.field", "Color", f.color), h("div.chips", { style: { justifyContent: "flex-start" } }, EMOJI.map((e) => h("button.chip", { type: "button", onClick: () => { f.avatar.value = e; drawPreview(); } }, e)))),

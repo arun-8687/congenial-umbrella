@@ -75,19 +75,70 @@ export interface Routine {
     enabled: boolean;
     threadId: string;
     lastRunAt: string | null;
+    /** Public id in the routine's webhook URL; null when no webhook is set up. */
+    hookId: string | null;
+    /** Events the webhook accepts (see `matchesEvent`); empty accepts every event. */
+    hookEvents: string[];
+    /** Where each run's result is posted; the URL itself stays sealed in the database. */
+    delivery: { type: DeliveryType; label: string } | null;
     createdAt: string;
     updatedAt: string;
 }
 
+export type DeliveryType = "slack" | "teams" | "webhook";
+
 export interface RoutineRun {
     id: string;
     routineId: string;
-    trigger: "schedule" | "manual";
+    trigger: "schedule" | "manual" | "webhook";
+    /** What started a webhook run, e.g. `pull_request.opened octo/app#12`. */
+    triggerDetail: string | null;
     status: "running" | "done" | "failed";
     output: string | null;
     error: string | null;
+    /** null until delivered; `sent` or `failed: <reason>` afterwards. */
+    deliveryStatus: string | null;
     startedAt: string;
     finishedAt: string | null;
+}
+
+export interface UsageRecord {
+    owner: string;
+    botId: string;
+    threadId: string | null;
+    /** What started the turn: chat, task, routine, ask (API), eval, bot (ask_bot). */
+    source: string;
+    model: string | null;
+    calls: number;
+    inputTokens: number;
+    outputTokens: number;
+    /** Copilot premium requests (the model's billing multiplier per call); 0 for BYOK models. */
+    premiumRequests: number;
+    toolCalls: number;
+    durationMs: number;
+    ok: boolean;
+}
+
+export interface UsageTotals {
+    turns: number;
+    calls: number;
+    inputTokens: number;
+    outputTokens: number;
+    premiumRequests: number;
+    toolCalls: number;
+    failed: number;
+}
+
+export type ApiScope = "ask" | "read" | "write";
+
+export interface ApiToken {
+    id: string;
+    owner: string;
+    name: string;
+    scopes: ApiScope[];
+    createdAt: string;
+    expiresAt: string | null;
+    lastUsedAt: string | null;
 }
 
 export interface Approval {
@@ -205,6 +256,9 @@ const toRoutine = (r: Row): Routine => ({
     enabled: r.enabled === 1,
     threadId: str(r.thread_id),
     lastRunAt: nstr(r.last_run_at),
+    hookId: nstr(r.hook_id),
+    hookEvents: JSON.parse(str(r.hook_events ?? "[]")) as string[],
+    delivery: r.delivery ? (({ type, label }) => ({ type, label }))(JSON.parse(str(r.delivery)) as { type: DeliveryType; label: string }) : null,
     createdAt: str(r.created_at),
     updatedAt: str(r.updated_at),
 });
@@ -213,9 +267,11 @@ const toRun = (r: Row): RoutineRun => ({
     id: str(r.id),
     routineId: str(r.routine_id),
     trigger: r.trigger as RoutineRun["trigger"],
+    triggerDetail: nstr(r.trigger_detail),
     status: r.status as RoutineRun["status"],
     output: nstr(r.output),
     error: nstr(r.error),
+    deliveryStatus: nstr(r.delivery_status),
     startedAt: str(r.started_at),
     finishedAt: nstr(r.finished_at),
 });
@@ -251,6 +307,30 @@ const toSkill = (r: Row): UserSkill => ({
     status: r.status as UserSkill["status"],
     createdAt: str(r.created_at),
     updatedAt: str(r.updated_at),
+});
+
+const TOTALS = `COUNT(*) AS turns, COALESCE(SUM(calls), 0) AS calls, COALESCE(SUM(input_tokens), 0) AS input_tokens,
+    COALESCE(SUM(output_tokens), 0) AS output_tokens, COALESCE(SUM(premium_requests), 0) AS premium_requests,
+    COALESCE(SUM(tool_calls), 0) AS tool_calls, COALESCE(SUM(1 - ok), 0) AS failed`;
+
+const toTotals = (r: Row | undefined): UsageTotals => ({
+    turns: Number(r?.turns ?? 0),
+    calls: Number(r?.calls ?? 0),
+    inputTokens: Number(r?.input_tokens ?? 0),
+    outputTokens: Number(r?.output_tokens ?? 0),
+    premiumRequests: Math.round(Number(r?.premium_requests ?? 0) * 100) / 100,
+    toolCalls: Number(r?.tool_calls ?? 0),
+    failed: Number(r?.failed ?? 0),
+});
+
+const toApiToken = (r: Row): ApiToken => ({
+    id: str(r.id),
+    owner: str(r.owner),
+    name: str(r.name),
+    scopes: JSON.parse(str(r.scopes)) as ApiScope[],
+    createdAt: str(r.created_at),
+    expiresAt: nstr(r.expires_at),
+    lastUsedAt: nstr(r.last_used_at),
 });
 
 /** Typed queries over the SQLite schema. Every method is scoped by owner where data is per user. */
@@ -468,7 +548,7 @@ export class Repo {
     }
 
     // ---- routines
-    createRoutine(r: Omit<Routine, "id" | "createdAt" | "updatedAt" | "lastRunAt">): Routine {
+    createRoutine(r: Omit<Routine, "id" | "createdAt" | "updatedAt" | "lastRunAt" | "hookId" | "hookEvents" | "delivery">): Routine {
         const id = newId();
         const t = now();
         this.db.run(
@@ -505,11 +585,11 @@ export class Repo {
     deleteRoutine(id: string): void {
         this.db.run("DELETE FROM routines WHERE id = ?", id);
     }
-    startRun(routineId: string, trigger: RoutineRun["trigger"], keep: number): RoutineRun {
+    startRun(routineId: string, trigger: RoutineRun["trigger"], keep: number, triggerDetail: string | null = null): RoutineRun {
         const id = newId();
         const t = now();
         this.db.tx(() => {
-            this.db.run("INSERT INTO routine_runs (id, routine_id, trigger, status, started_at) VALUES (?, ?, ?, 'running', ?)", id, routineId, trigger, t);
+            this.db.run("INSERT INTO routine_runs (id, routine_id, trigger, trigger_detail, status, started_at) VALUES (?, ?, ?, ?, 'running', ?)", id, routineId, trigger, triggerDetail, t);
             this.db.run("UPDATE routines SET last_run_at = ? WHERE id = ?", t, routineId);
             this.db.run(
                 `DELETE FROM routine_runs WHERE routine_id = ? AND id NOT IN
@@ -517,7 +597,34 @@ export class Repo {
                 routineId, routineId, keep,
             );
         });
-        return { id, routineId, trigger, status: "running", output: null, error: null, startedAt: t, finishedAt: null };
+        return { id, routineId, trigger, triggerDetail, status: "running", output: null, error: null, deliveryStatus: null, startedAt: t, finishedAt: null };
+    }
+    setRunDelivery(id: string, status: string): void {
+        this.db.run("UPDATE routine_runs SET delivery_status = ? WHERE id = ?", status.slice(0, 300), id);
+    }
+
+    // ---- routine webhooks and delivery
+    setRoutineHook(id: string, hook: { hookId: string; secretCiphertext: string } | null): void {
+        this.db.run("UPDATE routines SET hook_id = ?, hook_secret = ?, updated_at = ? WHERE id = ?", hook?.hookId ?? null, hook?.secretCiphertext ?? null, now(), id);
+    }
+    setHookEvents(id: string, events: string[]): void {
+        this.db.run("UPDATE routines SET hook_events = ?, updated_at = ? WHERE id = ?", JSON.stringify(events), now(), id);
+    }
+    routineByHook(hookId: string): { routine: Routine; secretCiphertext: string } | undefined {
+        const r = this.db.get<Row>("SELECT * FROM routines WHERE hook_id = ? AND hook_secret IS NOT NULL", hookId);
+        return r && { routine: toRoutine(r), secretCiphertext: str(r.hook_secret) };
+    }
+    /** Records a webhook delivery id; false when it was already seen (a retry or a replay). */
+    recordHookDelivery(routineId: string, deliveryId: string): boolean {
+        this.db.run("DELETE FROM hook_deliveries WHERE received_at < ?", new Date(Date.now() - 7 * 86400_000).toISOString());
+        return this.db.run("INSERT OR IGNORE INTO hook_deliveries (routine_id, delivery_id, received_at) VALUES (?, ?, ?)", routineId, deliveryId, now()).changes > 0;
+    }
+    setRoutineDelivery(id: string, delivery: { type: DeliveryType; label: string; sealed: string } | null): void {
+        this.db.run("UPDATE routines SET delivery = ?, updated_at = ? WHERE id = ?", delivery ? JSON.stringify(delivery) : null, now(), id);
+    }
+    routineDelivery(id: string): { type: DeliveryType; label: string; sealed: string } | undefined {
+        const r = this.db.get<Row>("SELECT delivery FROM routines WHERE id = ?", id);
+        return r?.delivery ? (JSON.parse(str(r.delivery)) as { type: DeliveryType; label: string; sealed: string }) : undefined;
     }
     finishRun(id: string, status: "done" | "failed", output: string | null, error: string | null): void {
         this.db.run("UPDATE routine_runs SET status = ?, output = ?, error = ?, finished_at = ? WHERE id = ?", status, output, error, now(), id);
@@ -691,6 +798,58 @@ export class Repo {
         );
     }
 
+    // ---- usage metering
+    addUsage(u: UsageRecord): void {
+        const t = now();
+        this.db.run(
+            `INSERT INTO usage (owner, bot_id, thread_id, source, model, calls, input_tokens, output_tokens, premium_requests, tool_calls, duration_ms, ok, day, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            u.owner, u.botId, u.threadId, u.source, u.model, u.calls, u.inputTokens, u.outputTokens, u.premiumRequests, u.toolCalls, u.durationMs, u.ok ? 1 : 0, t.slice(0, 10), t,
+        );
+    }
+    /** One person's totals for a UTC day (YYYY-MM-DD). */
+    usageFor(owner: string, day: string): UsageTotals {
+        return toTotals(this.db.get<Row>(`SELECT ${TOTALS} FROM usage WHERE owner = ? AND day = ?`, owner, day));
+    }
+    /** Totals since `sinceDay`, grouped by `by`, largest premium-request users first. */
+    usageBy(by: "day" | "owner" | "bot_id" | "model" | "source", sinceDay: string, owner?: string): ({ key: string } & UsageTotals)[] {
+        const order = by === "day" ? "key" : "premium_requests DESC, turns DESC";
+        return this.db
+            .all<Row>(
+                `SELECT COALESCE(${by}, '(unknown)') AS key, ${TOTALS} FROM usage WHERE day >= ? ${owner ? "AND owner = ?" : ""} GROUP BY key ORDER BY ${order} LIMIT 200`,
+                sinceDay, ...(owner ? [owner] : []),
+            )
+            .map((r) => ({ key: str(r.key), ...toTotals(r) }));
+    }
+    pruneUsage(beforeDay: string): void {
+        this.db.run("DELETE FROM usage WHERE day < ?", beforeDay);
+    }
+
+    // ---- platform API tokens
+    createApiToken(owner: string, name: string, tokenHash: string, scopes: ApiScope[], expiresAt: string | null): ApiToken {
+        const id = newId();
+        this.db.run("INSERT INTO api_tokens (id, owner, name, token_hash, scopes, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)", id, owner, name, tokenHash, JSON.stringify(scopes), now(), expiresAt);
+        return this.apiTokens(owner).find((t) => t.id === id)!;
+    }
+    /** The live token with this hash (never expired). */
+    apiTokenByHash(tokenHash: string): ApiToken | undefined {
+        const r = this.db.get<Row>("SELECT * FROM api_tokens WHERE token_hash = ? AND (expires_at IS NULL OR expires_at > ?)", tokenHash, now());
+        return r && toApiToken(r);
+    }
+    apiTokens(owner: string): ApiToken[] {
+        return this.db.all<Row>("SELECT * FROM api_tokens WHERE owner = ? ORDER BY created_at DESC", owner).map(toApiToken);
+    }
+    countApiTokens(owner: string): number {
+        return Number(this.db.get<Row>("SELECT COUNT(*) AS n FROM api_tokens WHERE owner = ?", owner)?.n ?? 0);
+    }
+    touchApiToken(id: string): void {
+        // At most once a minute per token, so busy CI jobs don't turn every call into a write.
+        this.db.run("UPDATE api_tokens SET last_used_at = ? WHERE id = ? AND (last_used_at IS NULL OR last_used_at < ?)", now(), id, new Date(Date.now() - 60_000).toISOString());
+    }
+    deleteApiToken(owner: string, id: string): boolean {
+        return this.db.run("DELETE FROM api_tokens WHERE owner = ? AND id = ?", owner, id).changes > 0;
+    }
+
     /** Everything stored for one person, for "delete my data". Audit records are kept. */
     deleteUserData(owner: string): { uploads: string[]; sessions: string[] } {
         return this.db.tx(() => {
@@ -701,7 +860,9 @@ export class Repo {
             for (const table of ["threads", "tasks", "routines", "approvals", "memories", "notifications", "jobs", "uploads", "share_links", "personal_bots"]) {
                 this.db.run(`DELETE FROM ${table} WHERE owner = ?`, owner);
             }
-            for (const table of ["credentials", "user_skills", "bot_prefs"]) this.db.run(`DELETE FROM ${table} WHERE owner = ?`, owner);
+            for (const table of ["credentials", "user_skills", "bot_prefs", "api_tokens"]) this.db.run(`DELETE FROM ${table} WHERE owner = ?`, owner);
+            // Usage stays for capacity planning and chargeback, without the person's login.
+            this.db.run("UPDATE usage SET owner = '(deleted user)', thread_id = NULL WHERE owner = ?", owner);
             this.db.run("DELETE FROM web_sessions WHERE login = ?", owner);
             this.db.run("DELETE FROM users WHERE login = ?", owner);
             return { uploads, sessions };
@@ -724,6 +885,15 @@ export class Repo {
             each("SELECT login, token_ciphertext FROM users", "UPDATE users SET token_ciphertext = ? WHERE login = ?", "token_ciphertext", ["login"]);
             each("SELECT id_hash, token_ciphertext FROM web_sessions", "UPDATE web_sessions SET token_ciphertext = ? WHERE id_hash = ?", "token_ciphertext", ["id_hash"]);
             each("SELECT owner, connector_id, ciphertext FROM credentials", "UPDATE credentials SET ciphertext = ? WHERE owner = ? AND connector_id = ?", "ciphertext", ["owner", "connector_id"]);
+            each("SELECT id, hook_secret FROM routines WHERE hook_secret IS NOT NULL", "UPDATE routines SET hook_secret = ? WHERE id = ?", "hook_secret", ["id"]);
+            for (const r of this.db.all<Row>("SELECT id, delivery FROM routines WHERE delivery IS NOT NULL")) {
+                const d = JSON.parse(str(r.delivery)) as { sealed: string };
+                const next = reseal(d.sealed);
+                if (next !== undefined) {
+                    this.db.run("UPDATE routines SET delivery = ? WHERE id = ?", JSON.stringify({ ...d, sealed: next }), str(r.id));
+                    n++;
+                }
+            }
             return n;
         });
     }

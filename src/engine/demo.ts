@@ -116,6 +116,8 @@ export class DemoEngine implements AgentEngine {
     }
 
     private async stream(req: TurnRequest, reply: string): Promise<TurnResult> {
+        // Plausible metering, so usage views have something to show in demos.
+        req.onEvent?.({ type: "usage", model: req.bot.model ?? "demo", inputTokens: 600 + req.prompt.length, outputTokens: Math.ceil(reply.length / 4), premiumRequests: 1, durationMs: 400 });
         let out = "";
         for (const chunk of reply.match(/\S+\s*/g) ?? []) {
             if (req.signal?.aborted) return { text: out, aborted: true };

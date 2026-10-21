@@ -1,7 +1,10 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { randomToken, sha256, type Sealer } from "../crypto.js";
 import type { Authenticator, User } from "../identity.js";
-import type { Repo } from "../runtime/repo.js";
+import type { ApiScope, Repo } from "../runtime/repo.js";
+
+/** Prefix of platform API tokens, so they are recognizable (and scannable) in logs and repos. */
+export const API_TOKEN_PREFIX = "cbp_";
 
 export const SESSION_COOKIE = "cb_session";
 const STATE_COOKIE = "cb_oauth_state";
@@ -42,9 +45,26 @@ export class WebAuth {
         return this.o.devLogin;
     }
 
-    /** Resolves the request's user, and whether it came from a cookie (cookie requests need CSRF checks). */
-    async userFor(req: IncomingMessage): Promise<{ user: User; viaCookie: boolean } | null> {
-        const bearer = /^Bearer\s+(.+)$/i.exec(req.headers.authorization ?? "")?.[1];
+    /**
+     * Resolves the request's user, whether it came from a cookie (cookie requests need CSRF checks),
+     * and for platform API tokens the scopes the token was given.
+     */
+    async userFor(req: IncomingMessage): Promise<{ user: User; viaCookie: boolean; scopes?: ApiScope[]; tokenId?: string } | null> {
+        const bearer = /^Bearer\s+(.+)$/i.exec(req.headers.authorization ?? "")?.[1]?.trim();
+        if (bearer?.startsWith(API_TOKEN_PREFIX)) {
+            const t = this.o.repo.apiTokenByHash(sha256(bearer));
+            const stored = t && this.o.repo.user(t.owner);
+            if (!t || !stored) return null;
+            // The token acts as its owner, so the owner's GitHub sign-in must still be valid.
+            const token = this.o.sealer.open(stored.tokenCiphertext);
+            const user =
+                this.o.devLogin && token.startsWith("dev-token-")
+                    ? { login: stored.login, id: stored.githubId, orgs: stored.orgs, githubToken: token }
+                    : await this.o.authenticator.authenticate(token);
+            if (!user || user.login !== t.owner) return null;
+            this.o.repo.touchApiToken(t.id);
+            return { user, viaCookie: false, scopes: t.scopes, tokenId: t.id };
+        }
         if (bearer) {
             const user = await this.o.authenticator.authenticate(bearer);
             if (user) this.o.onSignIn(user);

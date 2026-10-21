@@ -1,6 +1,7 @@
 import { h, clear, icon, iconButton, get, post, put, patch, del, api, avatar, markdown, timeAgo, toast, errorText, bytes, modal, confirmDialog, switchInput, ALWAYS_ALLOWABLE } from "./lib.js";
 import { S, on, bot, botName, statusOf, navigate, setProfile, topbar, refreshBots } from "./app.js";
 import { openNewBot, openEditBot, openNewGroup } from "./modals.js";
+import { openRoutineIntegrations, routineBadges, apiTokensSection, myUsageSection, adminUsage } from "./eng.js";
 
 const page = (...children) => h("div.page", h("div.page-inner", ...children));
 
@@ -180,7 +181,7 @@ export async function renderRoutines(root) {
         const { routines } = await get("/api/routines");
         clear(
             root,
-            topbar("Routines", "Saved workflows a bot runs on a schedule or on demand", h("button.btn.primary.sm", { type: "button", onClick: () => editRoutine(null, draw) }, icon("plus"), "New routine")),
+            topbar("Routines", "Saved workflows a bot runs on a schedule, on demand, or when a webhook fires", h("button.btn.primary.sm", { type: "button", onClick: () => editRoutine(null, draw) }, icon("plus"), "New routine")),
             page(
                 routines.length
                     ? routines.map((r) =>
@@ -192,10 +193,12 @@ export async function renderRoutines(root) {
                                   h("div.grow", h("h3", r.name, r.enabled ? null : h("span.tag.warn", { style: { marginLeft: "8px" } }, "Off · review and switch on")), h("div.meta", `${botName(r.botId)} · ${r.schedule ? describeCron(r.schedule) + (r.timezone ? ` (${r.timezone})` : "") : "On demand"}${r.nextRunAt && r.enabled ? ` · next ${new Date(r.nextRunAt).toLocaleString()}` : ""}`)),
                                   switchInput(r.enabled, async (v) => { await patch(`/api/routines/${r.id}`, { enabled: v }); void draw(); }, "Enabled"),
                                   h("button.btn.sm", { type: "button", onClick: async () => { await post(`/api/routines/${r.id}/run`); toast("Routine started", r.name); void draw(); } }, icon("play"), "Run now"),
+                                  iconButton("webhook", "Triggers & delivery", () => openRoutineIntegrations(r, draw)),
                                   iconButton("edit", "Edit", () => editRoutine(r, draw)),
                                   iconButton("trash", "Delete", async () => { if (await confirmDialog("Delete routine?", r.name, "Delete", true)) { await del(`/api/routines/${r.id}`); void draw(); } }),
                               ),
                               h("p.small.muted", { style: { margin: "8px 0" } }, r.prompt.slice(0, 220)),
+                              r.hookUrl || r.delivery ? h("div.tags", { style: { marginBottom: "8px" } }, routineBadges(r)) : null,
                               r.runs.length
                                   ? h(
                                         "div",
@@ -204,7 +207,8 @@ export async function renderRoutines(root) {
                                                 "div.list-row.small",
                                                 h("span.tag", { class: run.status === "done" ? "ok" : run.status === "failed" ? "danger" : "warn" }, run.status),
                                                 h("span.grow.ellipsis.muted", run.output?.slice(0, 140) ?? run.error ?? "Running…"),
-                                                h("span.muted", `${run.trigger} · ${timeAgo(run.startedAt)}`),
+                                                run.deliveryStatus ? h("span.tag", { class: run.deliveryStatus === "sent" ? "ok" : "danger", title: run.deliveryStatus }, run.deliveryStatus === "sent" ? "posted" : "post failed") : null,
+                                                h("span.muted.ellipsis", { style: { maxWidth: "40%" }, title: run.triggerDetail ?? run.trigger }, `${run.triggerDetail ?? run.trigger} · ${timeAgo(run.startedAt)}`),
                                             ),
                                         ),
                                         h("button.btn.sm.ghost", { type: "button", onClick: () => navigate(`#/t/${r.threadId}`) }, "Open run history"),
@@ -414,8 +418,8 @@ export async function renderComputer(root) {
 
 // ====================================================================== Settings (instructions, memory)
 export async function renderSettings(root) {
-    const draw = async () => {
-        const [{ memories }, me] = await Promise.all([get("/api/memory"), get("/api/me")]);
+    const draw = async (shownToken = null) => {
+        const [{ memories }, me, usage, tokens] = await Promise.all([get("/api/memory"), get("/api/me"), myUsageSection(), apiTokensSection(draw, shownToken)]);
         const instructions = h("textarea.input", { rows: 5, value: me.instructions, placeholder: "How you like to work: tone, format, timezone, priorities…" });
         const newMem = h("input.input", { placeholder: "Add something every bot should know about you" });
         const groups = new Map([[null, []]]);
@@ -458,6 +462,8 @@ export async function renderSettings(root) {
                           )
                         : null,
                 ),
+                usage,
+                tokens,
                 h("h3", { style: { marginTop: "28px", color: "var(--danger)" } }, "Delete my data"),
                 h(
                     "div.card",
@@ -477,15 +483,26 @@ export async function renderSettings(root) {
 
 // ====================================================================== Admin audit log
 export async function renderAdmin(root) {
+    let tab = "usage";
+    let days = 30;
     let date = new Date().toISOString().slice(0, 10);
     let q = "";
+    const tabs = () => h("div.tabs.page-tabs", { role: "tablist" }, [["usage", "Usage"], ["audit", "Audit log"]].map(([k, l]) => h("button", { type: "button", role: "tab", "aria-selected": String(tab === k), class: tab === k ? "on" : "", onClick: () => { tab = k; void draw(); } }, l)));
+    const reload = h("button.btn.sm", { type: "button", onClick: async () => { const r = await post("/api/admin/reload"); toast("Workspace reloaded", `${r.bots} bots, ${r.connectors} connectors, ${r.skills} skills`); await refreshBots(); } }, icon("refresh"), "Reload workspace");
     const draw = async () => {
+        if (tab === "usage") {
+            const body = h("div");
+            clear(root, topbar("Admin", "Usage across the organization: who uses what, and what it costs", reload), tabs(), page(body));
+            await adminUsage(body, days, (d) => { days = d; void draw(); });
+            return;
+        }
         const { records } = await get(`/api/admin/audit?date=${date}&q=${encodeURIComponent(q)}`);
         const dateIn = h("input.input", { type: "date", value: date, style: { width: "auto" }, onChange: (e) => { date = e.target.value; void draw(); } });
         const qIn = h("input.input", { value: q, placeholder: "Filter: login, bot, type, trace id…", onKeydown: (e) => { if (e.key === "Enter") { q = e.target.value; void draw(); } } });
         clear(
             root,
-            topbar("Audit log", "Every message, tool call, approval and bot-to-bot hop", h("button.btn.sm", { type: "button", onClick: async () => { const r = await post("/api/admin/reload"); toast("Workspace reloaded", `${r.bots} bots, ${r.connectors} connectors, ${r.skills} skills`); await refreshBots(); } }, icon("refresh"), "Reload workspace")),
+            topbar("Admin", "Every message, tool call, approval and bot-to-bot hop", reload),
+            tabs(),
             page(
                 h("div.toolbar", dateIn, h("div.grow", qIn)),
                 records.length

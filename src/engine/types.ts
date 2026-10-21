@@ -20,7 +20,9 @@ export type EngineEvent =
     | { type: "reasoning"; text: string }
     | { type: "tool.start"; tool: string; args?: unknown }
     | { type: "tool.complete"; tool: string; success: boolean }
-    | { type: "permission"; kind: string; decision: "approve" | "reject"; detail?: string };
+    | { type: "permission"; kind: string; decision: "approve" | "reject"; detail?: string }
+    /** One model call. `premiumRequests` is Copilot's billing multiplier for it (0 or absent for BYOK). */
+    | { type: "usage"; model: string; inputTokens: number; outputTokens: number; premiumRequests: number; durationMs: number };
 
 export interface PermissionAsk {
     kind: string;

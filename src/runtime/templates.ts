@@ -4,6 +4,8 @@ export interface BotTemplate {
     key: string;
     label: string;
     bot: Omit<BotSpecInput, "id">;
+    /** How to put the bot to work, shown when the template is picked (e.g. which webhook to wire up). */
+    tip?: string;
 }
 
 /** Starting points offered in the "New bot" dialog. Each is a normal personal bot once created. */
@@ -70,6 +72,45 @@ export const BOT_TEMPLATES: BotTemplate[] = [
                 "most severe first, each with file, line and a concrete fix. Don't comment on the PR unless the user asks.",
             connectors: ["github"],
         },
+        tip: "Review every new pull request: create a routine for this bot, turn on its webhook, and filter on “PR opened”. Post results to your team's Slack channel.",
+    },
+    {
+        key: "ci-doctor",
+        label: "CI Doctor",
+        bot: {
+            name: "Medic",
+            title: "CI Doctor",
+            avatar: "🩺",
+            color: "#06b6d4",
+            description: "Diagnoses failing CI runs: finds the first real error, the likely cause, and the fix.",
+            instructions:
+                "When a CI run fails, read its jobs and logs with the GitHub connector. Find the first real error (not the cascade " +
+                "after it), say whether it looks like a flaky test, an infrastructure problem or a real regression, and point to " +
+                "the commit and lines most likely responsible. Propose a concrete fix. Never re-run jobs or push changes yourself.",
+            connectors: ["github"],
+            builtinTools: ["web_fetch"],
+            allowedDomains: ["github.com", "*.githubusercontent.com", "docs.github.com"],
+        },
+        tip: "Wire it to CI: create a routine, turn on its webhook in your repository's settings, and filter on “CI failed”.",
+    },
+    {
+        key: "oncall-triage",
+        label: "On-call Triage",
+        bot: {
+            name: "Triage",
+            title: "On-call Triage",
+            avatar: "📟",
+            color: "#f43f5e",
+            description: "First responder for alerts: assesses impact, suggests the runbook step, and pulls in the incident commander.",
+            instructions:
+                "For each alert, state in three lines: what is affected, how bad it is (SEV1-4 with your reason), and the first " +
+                "runbook step. Check recent deploys and open incidents with the GitHub connector when that helps. For SEV1-2, " +
+                "hand the incident to the incident commander with assign_task. Never acknowledge, silence or resolve alerts yourself.",
+            connectors: ["github"],
+            skills: ["incident-summary"],
+            canMessage: ["*"],
+        },
+        tip: "Point your alerting tool's webhook at a routine for this bot (send the secret as a Bearer token), and post results to the on-call channel.",
     },
     {
         key: "bug-reproducer",

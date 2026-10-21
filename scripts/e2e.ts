@@ -43,6 +43,7 @@ let step = 0;
 const shot = async (name: string, p: Page = page) => {
     step += 1;
     await p.waitForTimeout(250);
+    await p.evaluate(() => document.querySelectorAll(".toast").forEach((t) => t.remove()));
     await p.screenshot({ path: path.join(shots, `${String(step).padStart(2, "0")}-${name}.png`) });
     console.log(`  ✓ ${name}`);
 };
@@ -156,11 +157,73 @@ try {
         await page.getByRole("button", { name: "Cancel" }).click();
     }
 
-    for (const [hash, name] of [["#/inbox", "inbox"], ["#/tasks", "tasks"], ["#/routines", "routines"], ["#/skills", "skills"], ["#/connectors", "connectors"], ["#/computer", "computer"], ["#/settings", "settings-memory"], ["#/admin", "audit-log"], ["#/", "home-team"]] as const) {
+    // Engineering integrations: a webhook starts a routine, results post to a channel
+    await page.goto(`${base}/#/routines`);
+    await page.waitForSelector(".page-inner .card");
+    const routineCard = page.locator(".page-inner .card").first();
+    await routineCard.locator(".switch").click(); // bots propose routines switched off
+    await page.waitForSelector(".page-inner .card:not(:has-text('Off · review'))");
+    await page.locator(".page-inner .card").first().getByRole("button", { name: "Triggers & delivery" }).click();
+    await page.locator(".modal .switch").first().click();
+    await page.waitForSelector(".modal .secret-box");
+    const hookUrl = await page.locator(".modal .secret-row input").first().inputValue();
+    const hookSecret = await page.locator(".modal .secret-box input").inputValue();
+    await page.locator(".modal .chip", { hasText: "CI failed" }).click();
+    await page.getByRole("button", { name: "Save filters" }).click();
+    await shot("routine-webhook");
+    await page.getByRole("button", { name: "Done" }).click();
+    const delivered = await fetch(hookUrl, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${hookSecret}`, "X-Event-Type": "workflow_run.completed" },
+        body: JSON.stringify({ action: "completed", workflow_run: { name: "CI", conclusion: "failure", html_url: "https://github.com/acme/api/actions/runs/1" }, repository: { full_name: "acme/api" } }),
+    });
+    if (delivered.status !== 202) errors.push(`webhook delivery returned ${delivered.status}`);
+    await page.waitForSelector(".list-row:has-text('workflow_run.completed acme/api')", { timeout: 15_000 });
+    await shot("routine-webhook-run");
+
+    // API token for CI, and the one-shot ask endpoint it unlocks
+    await page.goto(`${base}/#/settings`);
+    await page.locator("input[placeholder='e.g. CI on api-gateway']").fill("CI on api-gateway");
+    await page.getByRole("button", { name: "Create token" }).click();
+    await page.waitForSelector(".secret-box");
+    const apiToken = await page.locator(".secret-box input").inputValue();
+    await page.locator(".secret-box").scrollIntoViewIfNeeded();
+    await shot("api-token");
+    const ask = await fetch(`${base}/api/bots/concierge/ask`, { method: "POST", headers: { Authorization: `Bearer ${apiToken}`, "Content-Type": "application/json" }, body: JSON.stringify({ prompt: "Summarize this diff", input: "+ retry()" }) });
+    const answer = (await ask.json()) as { status?: string };
+    if (ask.status !== 200 || answer.status !== "done") errors.push(`ask API returned ${ask.status} ${JSON.stringify(answer)}`);
+
+    // Illustrative history for the usage screenshots: a month of a small team's activity.
+    const people = ["alice", "bob", "carol", "dmitri"];
+    const botIds = app.runtime.directory.bots({ login: "alice", orgs: ["demo"] }).map((e) => e.bot.id);
+    for (let d = 29; d >= 1; d--) {
+        const day = new Date(Date.now() - d * 86400_000).toISOString().slice(0, 10);
+        const weekday = ![0, 6].includes(new Date(`${day}T12:00:00Z`).getUTCDay());
+        people.forEach((login, i) => {
+            const turns = weekday ? 3 + ((d * 7 + i * 5) % 9) : (d + i) % 2;
+            for (let t = 0; t < turns; t++) {
+                const [source, model] = ([["chat", "gpt-5"], ["task", "claude-sonnet-4.5"], ["routine", "gpt-5"], ["api", "gpt-5-mini"]] as const)[(t + i) % 4]!;
+                const bot = botIds[(t * 3 + i + d) % botIds.length]!;
+                app.runtime.repo.db.run(
+                    "INSERT INTO usage (owner, bot_id, source, model, calls, input_tokens, output_tokens, premium_requests, tool_calls, duration_ms, ok, day, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    login, bot, source, model, 2, 4000 + t * 900, 600 + t * 80, model === "gpt-5-mini" ? 0 : 1, t % 3, 9000, (d + t) % 23 === 0 ? 0 : 1, day, `${day}T10:00:00.000Z`,
+                );
+            }
+        });
+    }
+
+    for (const [hash, name] of [["#/inbox", "inbox"], ["#/tasks", "tasks"], ["#/routines", "routines"], ["#/skills", "skills"], ["#/connectors", "connectors"], ["#/computer", "computer"], ["#/settings", "settings-memory"], ["#/admin", "admin-usage"], ["#/", "home-team"]] as const) {
         await page.goto(`${base}/${hash}`);
         await page.waitForSelector(".page-inner");
         await shot(name);
     }
+
+    await page.goto(`${base}/#/admin`);
+    await page.getByRole("tab", { name: "Audit log" }).click();
+    await page.waitForSelector(".list-row .tag");
+    await shot("audit-log");
+    await page.goto(`${base}/#/`);
+    await page.waitForSelector(".page-inner");
 
     // Search palette
     await page.keyboard.press("Control+k");

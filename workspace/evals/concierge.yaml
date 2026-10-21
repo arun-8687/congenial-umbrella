@@ -1,0 +1,13 @@
+# Regression cases for the concierge. Run with `copilot-bots eval --junit reports/evals.xml`.
+bot: concierge
+cases:
+  - name: answers simple questions itself
+    prompt: What is 12 times 12? Reply with just the number.
+    expect:
+      contains: ["144"]
+      noTools: [ask_bot, assign_task]
+
+  - name: routes current-events questions to the researcher
+    prompt: What changed in the most recent TypeScript release? Check the web.
+    expect:
+      tools: [ask_bot]

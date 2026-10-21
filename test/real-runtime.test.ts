@@ -310,4 +310,27 @@ describe("real Copilot runtime", () => {
         },
         T,
     );
+
+    it(
+        "meters real model calls and runs bot evals through the real runtime",
+        async () => {
+            rt = await realRuntime({ bots: [bot("helper", { canMessage: ["*"] })] });
+            rt.model.script = (_req, h) => (h.lastUser.includes("who else") && !h.toolResults.length ? { toolCalls: [{ name: "list_bots", args: {} }] } : { text: "The answer is 144." });
+            await dm(rt, "helper", "what is 12 times 12?");
+            // BYOK models report tokens but no Copilot premium requests.
+            expect(rt.runtime.usageToday("alice").used).toMatchObject({ turns: 1, calls: 1, inputTokens: 100, outputTokens: 10, premiumRequests: 0 });
+
+            const { Catalog } = await import("../src/catalog/catalog.js");
+            const { runEvals } = await import("../src/evals.js");
+            const { writeWorkspace } = await import("./helpers.js");
+            const catalog = await Catalog.load(await writeWorkspace({ bots: [bot("helper", { canMessage: ["*"] })] }));
+            const suites = [{ file: "evals/helper.yaml", spec: { bot: "helper", cases: [
+                { name: "math", prompt: "what is 12 times 12?", approve: false, expect: { contains: ["144"], notContains: [], matches: [], tools: [], noTools: ["list_bots"] } },
+                { name: "roster", prompt: "who else is on the team?", approve: false, expect: { contains: [], notContains: [], matches: [], tools: ["list_bots"], noTools: [] } },
+            ] } }];
+            const results = await runEvals({ catalog, engine: rt.engine, suites, user: alice, turnTimeoutMs: 45_000 });
+            expect(results[0]!.cases.map((c) => [c.name, c.ok, c.failures])).toEqual([["math", true, []], ["roster", true, []]]);
+        },
+        T,
+    );
 });

@@ -229,7 +229,7 @@ export function renderSidebar() {
             navItem("#/skills", "book", "Skills"),
             navItem("#/connectors", "plug", "Connectors"),
             navItem("#/computer", "monitor", "Computer"),
-            S.me?.admin ? navItem("#/admin", "audit", "Audit log") : null,
+            S.me?.admin ? navItem("#/admin", "chart", "Admin") : null,
         ),
         h(
             "div.sidebar-scroll",
