@@ -1,4 +1,4 @@
-import { h, clear, icon, iconButton, get, post, patch, del, api, markdown, avatar, clock, dayLabel, toast, errorText, bytes, modal, confirmDialog } from "./lib.js";
+import { h, clear, icon, iconButton, get, post, patch, del, api, markdown, avatar, clock, dayLabel, toast, errorText, bytes, modal, confirmDialog, ALWAYS_ALLOWABLE } from "./lib.js";
 import { S, on, bot, botName, statusOf, navigate, setProfile, topbar, refreshThreads } from "./app.js";
 import { openSkillEditor } from "./pages.js";
 
@@ -217,7 +217,7 @@ export async function renderThread(root, threadId) {
                 ? h(
                       "div.row",
                       h("button.btn.primary.sm", { type: "button", onClick: () => decide(true) }, icon("check"), "Approve"),
-                      b?.editable ? h("button.btn.sm", { type: "button", onClick: () => decide(true, true) }, `Always allow ${a.kind}`) : null,
+                      b?.editable && ALWAYS_ALLOWABLE.includes(a.kind) ? h("button.btn.sm", { type: "button", onClick: () => decide(true, true) }, `Always allow ${a.kind}`) : null,
                       h("button.btn.sm.danger", { type: "button", onClick: () => decide(false) }, "Deny"),
                   )
                 : h("div.row", h("span.state", status === "approved" ? "✓ Approved" : status === "denied" ? "✕ Denied" : "Expired")),

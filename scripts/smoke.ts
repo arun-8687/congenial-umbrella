@@ -13,7 +13,7 @@ import { CopilotClient } from "@github/copilot-sdk";
 import { Auditor, MemoryAuditSink } from "../src/audit.js";
 import { Catalog } from "../src/catalog/catalog.js";
 import { Sealer } from "../src/crypto.js";
-import { CopilotEngine } from "../src/engine/copilot.js";
+import { CopilotEngine, runtimeEnv } from "../src/engine/copilot.js";
 import { GitHubAuthenticator } from "../src/identity.js";
 import { Directory } from "../src/runtime/directory.js";
 import { Hub } from "../src/runtime/events.js";
@@ -22,7 +22,7 @@ import { DEFAULT_RUNTIME_OPTIONS, Runtime } from "../src/runtime/runtime.js";
 import { Db } from "../src/store/db.js";
 
 const state = await mkdtemp(path.join(tmpdir(), "copilot-smoke-"));
-const client = new CopilotClient({ mode: "empty", useLoggedInUser: false, baseDirectory: path.join(state, "copilot"), logLevel: "error" });
+const client = new CopilotClient({ mode: "empty", useLoggedInUser: false, baseDirectory: path.join(state, "copilot"), logLevel: "error", env: runtimeEnv(process.env) });
 await client.start();
 console.log("runtime started; ping:", (await client.ping("smoke")).message);
 

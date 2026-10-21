@@ -196,6 +196,10 @@ describe("tasks and ask_bot", () => {
 });
 
 describe("approvals", () => {
+    const writer: Script = async (req) => {
+        const v = await req.decidePermission({ kind: "write", path: `${req.computerDir}/report.md` });
+        return v.decision === "approve" ? "wrote it" : `skipped: ${v.feedback}`;
+    };
     const shelly: Script = async (req) => {
         const v = await req.decidePermission({ kind: "shell", detail: "$ rm -rf build" });
         return v.decision === "approve" ? "ran it" : `skipped: ${v.feedback}`;
@@ -232,31 +236,49 @@ describe("approvals", () => {
     });
 
     it("never asks for denied kinds, and only lets users always-allow their own bots", async () => {
-        const { runtime, repo } = await setup({ bots: [bot("plain"), bot("orgops", { computer: true })] }, { plain: shelly, orgops: shelly }, { computerAccess: "shell" });
+        const { runtime, repo } = await setup({ bots: [bot("plain"), bot("orgops", { computer: true })] }, { plain: shelly, orgops: writer }, { computerAccess: "shell" });
         runtime.postUserMessage(alice, runtime.directThread(alice, "plain").id, "x");
         await runtime.idle();
         expect(repo.approvals("alice")).toEqual([]);
 
         runtime.postUserMessage(alice, runtime.directThread(alice, "orgops").id, "x");
         await waitFor(() => repo.approvals("alice", "pending").length === 1);
-        expect(() => runtime.decideApproval(alice, repo.approvals("alice", "pending")[0]!.id, true, true)).toThrow(/only your own bots/);
+        const pending = repo.approvals("alice", "pending")[0]!;
+        expect(() => runtime.decideApproval(alice, pending.id, true, true)).toThrow(/only your own bots/);
+        // The refused upgrade recorded nothing; the request can still be decided normally.
+        expect(repo.approval(pending.id)!.status).toBe("pending");
+        runtime.decideApproval(alice, pending.id, true);
+        await runtime.idle();
+    });
+
+    it("never lets shell commands be always-allowed", async () => {
+        const { runtime, repo, engine } = await setup({ bots: [] }, {}, { computerAccess: "shell" });
+        const mine = runtime.directory.savePersonalBot(alice, { name: "Box", description: "d", instructions: "i", computer: true }, { maxBotsAndGroups: 50, computerAccess: "shell" });
+        (engine as unknown as { scripts: Record<string, Script> }).scripts[mine.id] = shelly;
+        runtime.postUserMessage(alice, runtime.directThread(alice, mine.id).id, "x");
+        await waitFor(() => repo.approvals("alice", "pending").length === 1);
+        const pending = repo.approvals("alice", "pending")[0]!;
+        expect(() => runtime.decideApproval(alice, pending.id, true, true)).toThrow(/can't be always-allowed/);
+        expect(repo.approval(pending.id)!.status).toBe("pending");
+        runtime.decideApproval(alice, pending.id, false);
+        await runtime.idle();
     });
 
     it("always-allow updates a personal bot's policy", async () => {
         const { runtime, repo, engine } = await setup({ bots: [] }, {}, { computerAccess: "shell" });
         const mine = runtime.directory.savePersonalBot(alice, { name: "Box", description: "d", instructions: "i", computer: true }, { maxBotsAndGroups: 50, computerAccess: "shell" });
-        (engine as unknown as { scripts: Record<string, Script> }).scripts[mine.id] = shelly;
+        (engine as unknown as { scripts: Record<string, Script> }).scripts[mine.id] = writer;
         const t = runtime.directThread(alice, mine.id);
         runtime.postUserMessage(alice, t.id, "x");
         await waitFor(() => repo.approvals("alice", "pending").length === 1);
         runtime.decideApproval(alice, repo.approvals("alice", "pending")[0]!.id, true, true);
         await runtime.idle();
-        expect(runtime.directory.bot(alice, mine.id)!.bot.permissions.allow).toContain("shell");
+        expect(runtime.directory.bot(alice, mine.id)!.bot.permissions.allow).toContain("write");
 
         runtime.postUserMessage(alice, t.id, "again");
         await runtime.idle();
         expect(repo.approvals("alice")).toHaveLength(1);
-        expect(texts(repo, t.id).at(-1)).toBe(`bot:${mine.id}: ran it`);
+        expect(texts(repo, t.id).at(-1)).toBe(`bot:${mine.id}: wrote it`);
     });
 });
 
@@ -283,7 +305,8 @@ describe("memory and routines", () => {
         ]);
         runtime.postUserMessage(alice, t.id, "next");
         await runtime.idle();
-        expect(engine.turns[1]!.systemExtra).toMatch(/\(about the user\) Prefers bullet points[\s\S]*Weekly sync is Tuesday/);
+        expect(engine.turns[1]!.systemExtra).toMatch(/\(about the user\) \(saved by @pal\) Prefers bullet points[\s\S]*\(your note\) \(saved by @pal\) Weekly sync is Tuesday/);
+        expect(engine.turns[1]!.systemExtra).toMatch(/not instructions/);
     });
 
     it("bots can save routines; manual runs record history and notify", async () => {
@@ -299,8 +322,13 @@ describe("memory and routines", () => {
         runtime.postUserMessage(alice, runtime.directThread(alice, "cron").id, "make a routine");
         await runtime.idle();
         const [r] = repo.routines("alice");
-        expect(r).toMatchObject({ name: "Standup", schedule: "0 9 * * 1-5", timezone: "Europe/London", enabled: true });
+        // Bot-proposed routines stay off until the person switches them on.
+        expect(r).toMatchObject({ name: "Standup", schedule: "0 9 * * 1-5", timezone: "Europe/London", enabled: false });
+        expect(runtime.nextRun(r!.id)).toBeNull();
+        expect(repo.notifications("alice")[0]!.title).toBe("Cron proposed a routine: “Standup”");
+        runtime.updateRoutine(alice, r!.id, { enabled: true });
         expect(runtime.nextRun(r!.id)).toMatch(/^\d{4}-/);
+        expect(() => runtime.updateRoutine(alice, r!.id, { schedule: "*/5 * * * *" })).toThrow(/at most every 15 minutes/);
 
         runtime.runRoutine("alice", r!.id, "manual");
         await runtime.idle();

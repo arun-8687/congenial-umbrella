@@ -98,7 +98,11 @@ export function botTools(rt: Runtime, ctx: TurnContext): PlatformTool[] {
                     scope: z.enum(["user", "bot"]).default("bot"),
                 }),
                 handler: async ({ text, scope }) => {
-                    const m = rt.repo.addMemory(user.login, scope === "user" ? null : bot.id, text);
+                    if (rt.repo.countMemories(user.login) >= MAX_MEMORIES) return `Memory is full (${MAX_MEMORIES} items); ask the user to tidy it up in Settings.`;
+                    // One plain line: a saved memory is shown to every bot later, so keep it from posing as structure or instructions.
+                    const clean = text.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 500);
+                    if (!clean) return "Nothing to save.";
+                    const m = rt.repo.addMemory(user.login, scope === "user" ? null : bot.id, clean, bot.id);
                     audit({ type: "memory.saved", botId: bot.id, memoryId: m.id, scope });
                     return `Saved memory ${m.id.slice(0, 8)}.`;
                 },
@@ -122,8 +126,8 @@ export function botTools(rt: Runtime, ctx: TurnContext): PlatformTool[] {
         platformTool({
             name: "save_routine",
             description:
-                "Save a repeatable routine for yourself: a prompt you will run on a schedule (cron, e.g. '0 9 * * 1-5' for 9:00 on weekdays) " +
-                "or on demand. Use it when the user asks you to do something regularly or wants to reuse a workflow.",
+                "Propose a repeatable routine for yourself: a prompt you will run on a schedule (cron, e.g. '0 9 * * 1-5' for 9:00 on weekdays) " +
+                "or on demand. It is saved switched off; the user reviews and turns it on under Routines.",
             parameters: z.object({
                 name: z.string().min(1).max(80),
                 prompt: z.string().min(1).describe("Complete instructions for each run, written to your future self"),
@@ -132,8 +136,12 @@ export function botTools(rt: Runtime, ctx: TurnContext): PlatformTool[] {
             }),
             handler: async ({ name, prompt, schedule, timezone }) => {
                 try {
-                    const r = rt.createRoutine(user, { botId: bot.id, name, prompt, schedule: schedule ?? null, timezone: timezone ?? null });
-                    return `Saved routine "${r.name}"${r.schedule ? ` (${r.schedule}${r.timezone ? ` ${r.timezone}` : ""})` : " (on demand)"}. The user can edit it under Routines.`;
+                    // A bot can be steered by content it reads; it must never be able to schedule work for
+                    // itself without the person seeing it. Routines from bots start disabled.
+                    const r = rt.createRoutine(user, { botId: bot.id, name, prompt, schedule: schedule ?? null, timezone: timezone ?? null, enabled: false });
+                    rt.notify(user.login, "routine", `${bot.name} proposed a routine: “${r.name}”`, "Review it and switch it on under Routines.", thread.id);
+                    audit({ type: "routine.proposed", routineId: r.id, botId: bot.id, schedule: r.schedule });
+                    return `Proposed routine "${r.name}"${r.schedule ? ` (${r.schedule}${r.timezone ? ` ${r.timezone}` : ""})` : " (on demand)"}. It is off until the user reviews it and switches it on under Routines; tell them.`;
                 } catch (err) {
                     return `Could not save the routine: ${(err as Error).message}`;
                 }
@@ -144,9 +152,19 @@ export function botTools(rt: Runtime, ctx: TurnContext): PlatformTool[] {
     return tools;
 }
 
-/** Throws when `schedule` is not a valid cron expression. */
+const MAX_MEMORIES = 500;
+/** Routines may not run more often than this, so a misconfigured or hijacked schedule can't burn quota. */
+export const MIN_ROUTINE_INTERVAL_MINUTES = 15;
+
+/** Throws when `schedule` is not a valid cron expression or fires more often than the minimum interval. */
 export function validateSchedule(schedule: string, timezone?: string | null): void {
     const c = new Cron(schedule, { paused: true, ...(timezone ? { timezone } : {}) });
+    const runs = c.nextRuns(6);
     c.stop();
+    for (let i = 1; i < runs.length; i++) {
+        if (runs[i]!.getTime() - runs[i - 1]!.getTime() < MIN_ROUTINE_INTERVAL_MINUTES * 60_000) {
+            throw new Error(`routines can run at most every ${MIN_ROUTINE_INTERVAL_MINUTES} minutes`);
+        }
+    }
 }
 

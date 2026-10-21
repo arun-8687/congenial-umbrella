@@ -48,7 +48,7 @@ export class Db {
 
     private migrate(): void {
         const version = (this.get<{ user_version: number }>("PRAGMA user_version")?.user_version ?? 0);
-        const steps = [SCHEMA_V1, SCHEMA_V2];
+        const steps = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3];
         for (let v = version; v < steps.length; v++) {
             this.tx(() => {
                 this.sql.exec(steps[v]!);
@@ -261,4 +261,12 @@ CREATE TABLE bot_prefs (
     hidden INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (owner, bot_id)
 );
+`;
+
+/** v3: who wrote each memory (the user, or which bot), and share-link expiry. */
+const SCHEMA_V3 = `
+ALTER TABLE memories ADD COLUMN source TEXT NOT NULL DEFAULT 'user';
+ALTER TABLE share_links ADD COLUMN expires_at TEXT;
+-- Earlier links never expired and stored their token in the clear; revoke them.
+DELETE FROM share_links;
 `;

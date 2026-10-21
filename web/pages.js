@@ -1,4 +1,4 @@
-import { h, clear, icon, iconButton, get, post, put, patch, del, api, avatar, markdown, timeAgo, toast, errorText, bytes, modal, confirmDialog, switchInput } from "./lib.js";
+import { h, clear, icon, iconButton, get, post, put, patch, del, api, avatar, markdown, timeAgo, toast, errorText, bytes, modal, confirmDialog, switchInput, ALWAYS_ALLOWABLE } from "./lib.js";
 import { S, on, bot, botName, statusOf, navigate, setProfile, topbar, refreshBots } from "./app.js";
 import { openNewBot, openEditBot, openNewGroup } from "./modals.js";
 
@@ -78,7 +78,7 @@ export async function renderInbox(root) {
                               h(
                                   "div.row",
                                   h("button.btn.primary.sm", { type: "button", onClick: () => decide(a, true) }, "Approve"),
-                                  b?.editable ? h("button.btn.sm", { type: "button", onClick: () => decide(a, true, true) }, `Always allow ${a.kind}`) : null,
+                                  b?.editable && ALWAYS_ALLOWABLE.includes(a.kind) ? h("button.btn.sm", { type: "button", onClick: () => decide(a, true, true) }, `Always allow ${a.kind}`) : null,
                                   h("button.btn.sm.danger", { type: "button", onClick: () => decide(a, false) }, "Deny"),
                                   a.threadId ? h("button.btn.sm.ghost", { type: "button", onClick: () => navigate(`#/t/${a.threadId}`) }, "Open thread") : null,
                               ),
@@ -189,7 +189,7 @@ export async function renderRoutines(root) {
                               h(
                                   "div.card-head",
                                   avatar(bot(r.botId)),
-                                  h("div.grow", h("h3", r.name), h("div.meta", `${botName(r.botId)} · ${r.schedule ? describeCron(r.schedule) + (r.timezone ? ` (${r.timezone})` : "") : "On demand"}${r.nextRunAt && r.enabled ? ` · next ${new Date(r.nextRunAt).toLocaleString()}` : ""}`)),
+                                  h("div.grow", h("h3", r.name, r.enabled ? null : h("span.tag.warn", { style: { marginLeft: "8px" } }, "Off · review and switch on")), h("div.meta", `${botName(r.botId)} · ${r.schedule ? describeCron(r.schedule) + (r.timezone ? ` (${r.timezone})` : "") : "On demand"}${r.nextRunAt && r.enabled ? ` · next ${new Date(r.nextRunAt).toLocaleString()}` : ""}`)),
                                   switchInput(r.enabled, async (v) => { await patch(`/api/routines/${r.id}`, { enabled: v }); void draw(); }, "Enabled"),
                                   h("button.btn.sm", { type: "button", onClick: async () => { await post(`/api/routines/${r.id}/run`); toast("Routine started", r.name); void draw(); } }, icon("play"), "Run now"),
                                   iconButton("edit", "Edit", () => editRoutine(r, draw)),
@@ -439,7 +439,7 @@ export async function renderSettings(root) {
                               h("div.card-head", botId ? avatar(bot(botId), "sm") : icon("users"), h("h3.grow", botId ? `${botName(botId)}'s notes` : "About you (shared by all bots)")),
                               items.length
                                   ? items.map((m) => {
-                                        const text = h("span.grow", m.text);
+                                        const text = h("span.grow", m.text, m.source && m.source !== "user" ? h("span.small.muted", ` · saved by ${botName(m.source)}`) : null);
                                         return h(
                                             "div.list-row",
                                             text,

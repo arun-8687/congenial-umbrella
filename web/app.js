@@ -413,7 +413,8 @@ async function boot() {
     } catch {}
     if (location.pathname.startsWith("/s/")) return renderShare(location.pathname.slice(3));
 
-    const loginError = new URLSearchParams(location.search).get("login_error");
+    // The server only ever sends a fixed code; never show text taken from the URL.
+    const loginError = new URLSearchParams(location.search).get("login_error") ? "GitHub sign-in didn't complete. Please try again." : undefined;
     if (loginError) history.replaceState(null, "", "/");
     const session = await get("/auth/session", { allow401: true }).catch(() => ({ login: null }));
     if (!session.login) return renderLogin(loginError);

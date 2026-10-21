@@ -161,6 +161,9 @@ jobs that post into a routine thread.
 | `MAX_HOPS`, `MAX_BOT_CALLS`, `CONCURRENCY`, `MAX_PER_USER` | `3`, `12`, `4`, `2` | `MAX_PER_USER` keeps one person from starving others |
 | `COMPUTER_ACCESS` | `off` | `files` (file tools confined to each user's workspace) or `shell` |
 | `ALLOW_PRIVATE_NETWORK` | off | let bots fetch private/internal addresses |
+| `COMPUTER_SHELL_ISOLATED` | off | required with `COMPUTER_ACCESS=shell`: confirms each user's runtime is isolated |
+| `SECRET_KEY_PREVIOUS` | | old key during a rotation (`copilot-bots rotate-key`) |
+| `SHARE_TTL_DAYS`, `MAX_STORAGE_MB` | `30`, `1024` | share-link lifetime; per-user upload storage |
 | `TURN_TIMEOUT_MS`, `APPROVAL_TIMEOUT_MS` | 10 min, 30 min | |
 | `DEV_LOGIN` | off | demo only; refused with `ENGINE=copilot` |
 
@@ -179,17 +182,28 @@ untrusted (bots read untrusted content and can be prompt-injected), and narrows 
 | Shared org credentials | Connectors with `${env:...}` secrets are org-bot-only unless granted. |
 | Stale access | Cookie sessions re-check the token with GitHub (5-minute cache), and background work re-checks token and org membership before running as someone. |
 | Bot-to-bot loops and runaway cost | Allowlists, cycle refusal, hop limit, per-request budget, per-user concurrency and queue caps. |
-| Secrets at rest / in logs | Tokens and credentials are sealed with AES-256-GCM; known secrets are redacted from the audit log. |
+| Platform secrets reaching bots | The Copilot runtime (and every shell command and stdio connector it starts) gets an allowlisted environment: no `SECRET_KEY`, OAuth secret or server `GITHUB_TOKEN`. Connector secrets reach only their own MCP server, through `env`/`headers`; the catalog rejects secrets in command-line args or URLs. |
+| Prompt-injection persistence | Routines a bot proposes are saved switched off until the user enables them; schedules can't fire more than every 15 minutes. Memory written by bots is stored as one plain line, labelled with its author, and presented to bots as data, never instructions. |
+| One approval becoming permanent | "Always allow" exists only for workspace-confined file access and SSRF-guarded URLs on your own bots; shell commands and connector writes are approved one at a time. |
+| Browser attacks on the app | Strict CSP (no inline script or style), Trusted Types (only DOMPurify output reaches an HTML sink), `X-Frame-Options`, COOP/CORP, `nosniff`, no-store API responses, HSTS over HTTPS. Cookie writes need `X-CSRF` and a same-origin `Origin`. |
+| Uploaded content | Only images and plain text render inline; everything else downloads as `application/octet-stream` under a sandbox CSP. Per-user storage quota (`MAX_STORAGE_MB`). |
+| Brute force and abuse | Per-IP sign-in rate limit, per-user API and message rate limits, a cap on open event streams, per-user concurrency and queue caps. |
+| Share links | Stored as hashes, expire after `SHARE_TTL_DAYS`, and show only the conversation (no approvals, tool arguments, attachments or ids). |
+| Unsafe configurations | Startup refuses `DEV_LOGIN` off localhost, shell mode without `COMPUTER_SHELL_ISOLATED=1`, and OAuth without `PUBLIC_URL`. |
+| Secrets at rest / in logs | Tokens and credentials are sealed with AES-256-GCM in a 0700 state directory; `SECRET_KEY_PREVIOUS` + `copilot-bots rotate-key` rotate the key. Known secrets are redacted from the audit log and error logs. |
+| Audit integrity | Each audit record is hash-chained to the previous one, across days; `copilot-bots verify-audit` detects edited, removed or reordered records and deleted days. |
 
 ## Tests
 
 ```bash
-npm test          # 74 unit + HTTP tests (fake engine, in-memory SQLite)
+npm test          # 93 unit + HTTP tests (fake engine, in-memory SQLite)
 npm run e2e       # drives Chromium through every screen in demo mode → ./screenshots
 npm run typecheck # against the SDK's shipped .d.ts
 ```
 
-The E2E run fails on any console error, horizontal overflow at phone width, or off-origin request.
+The E2E run fails on any console error (including CSP violations), horizontal overflow at phone width,
+any off-origin request, or Trusted Types not being enforced. The security suites were checked by
+mutation: removing each guard makes a test fail.
 
 ## Known limits
 
@@ -199,6 +213,10 @@ The E2E run fails on any console error, horizontal overflow at phone width, or o
   - the runtime asking permission for every URL and file it touches;
   - MCP servers' read-only hints, which drive connector approvals.
   Run the smoke test with a licensed token before relying on them.
+- **Rate limits are per process and see the socket address.** Behind a reverse proxy every client
+  shares the proxy's IP for the sign-in limiter, so put per-client limits at the proxy as well.
+- **Audit chain:** the chain proves records weren't edited in place. Someone who can rewrite the whole
+  log could rebuild it, so ship records to write-once storage or a SIEM as they're written.
 - **Sandboxing:** the Computer's shell and stdio connectors run inside the server's container. Use one
   container per trust boundary, or connect to a sandboxed Copilot runtime with
   `RuntimeConnection.forUri`.

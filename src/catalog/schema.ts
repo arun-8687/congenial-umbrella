@@ -32,26 +32,26 @@ export type AccessSpec = z.infer<typeof AccessSpec>;
 export const BotSpec = z
     .object({
         id: Id,
-        name: z.string().min(1).max(80),
+        name: z.string().trim().min(1).max(80),
         /** Job title shown in the roster, e.g. "Release Manager". */
         title: z.string().min(1).max(60).optional(),
         /** Emoji or 1-2 characters shown as the avatar. */
         avatar: z.string().min(1).max(8).optional(),
         color: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
         description: z.string().min(1).max(500),
-        instructions: z.string().min(1),
-        model: z.string().min(1).optional(),
+        instructions: z.string().min(1).max(20_000),
+        model: z.string().min(1).max(100).regex(/^[A-Za-z0-9._:-]+$/).optional(),
         reasoningEffort: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
         builtinTools: z.array(BuiltinTool).default([]),
         /**
          * Domains web_fetch may reach (e.g. `docs.github.com`, `*.example.com`). Omit for any domain.
          * Limits where a prompt-injected bot can send data.
          */
-        allowedDomains: z.array(z.string().regex(/^(\*\.)?[a-z0-9.-]+$/i)).optional(),
-        skills: z.array(Id).default([]),
-        connectors: z.array(Id).default([]),
+        allowedDomains: z.array(z.string().max(253).regex(/^(\*\.)?[a-z0-9.-]+$/i)).max(50).optional(),
+        skills: z.array(Id).max(50).default([]),
+        connectors: z.array(Id).max(20).default([]),
         /** Bot ids this bot may message or hand tasks to; `"*"` means any bot the user can use. */
-        canMessage: z.array(z.union([Id, z.literal("*")])).default([]),
+        canMessage: z.array(z.union([Id, z.literal("*")])).max(50).default([]),
         access: AccessSpec.default({ users: [], orgs: [] }),
         /**
          * A per-user workspace (files, and shell commands when allowed) shared by all of that user's

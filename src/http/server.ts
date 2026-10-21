@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { Catalog, CatalogError } from "../catalog/catalog.js";
 import { derivedPermissions, type BotSpec } from "../catalog/schema.js";
-import { randomToken } from "../crypto.js";
+import { randomToken, sha256 } from "../crypto.js";
 import { canUseConnector, type User } from "../identity.js";
 import { insideDir } from "../engine/policy.js";
 import { DirectoryError, type BotEntry } from "../runtime/directory.js";
@@ -29,6 +29,11 @@ export interface ServerOptions {
     /** Public base URL (for OAuth redirects and share links); derived from the request when unset. */
     publicUrl?: string;
     maxUploadBytes?: number;
+    /** Total upload storage per user. */
+    maxStorageBytes?: number;
+    shareTtlDays?: number;
+    /** Emit HSTS (only when served over HTTPS). */
+    hsts?: boolean;
 }
 
 export class HttpError extends Error {
@@ -87,7 +92,21 @@ export function createAppServer(o: ServerOptions): Server {
         if (!isAdmin(u)) throw new HttpError(403, "admin access required");
     };
     const maxUpload = o.maxUploadBytes ?? 20_000_000;
+    const maxStorage = o.maxStorageBytes ?? 1024 * 1024 * 1024;
     const baseUrl = (req: IncomingMessage) => o.publicUrl ?? `http://${req.headers.host ?? "localhost"}`;
+    const authLimiter = new RateLimiter(10, 60_000); // sign-in attempts per IP per minute
+    const apiLimiter = new RateLimiter(600, 60_000); // API calls per user per minute
+    const postLimiter = new RateLimiter(60, 60_000); // messages, tasks and runs per user per minute
+    const streams = new Map<string, number>();
+    const MAX_STREAMS_PER_USER = 8;
+    const clientIp = (req: IncomingMessage) => req.socket.remoteAddress ?? "unknown";
+    /** Same-origin check for browser writes, on top of the X-CSRF header. */
+    const sameOrigin = (req: IncomingMessage) => {
+        const origin = req.headers.origin;
+        if (!origin) return true; // non-browser clients; CSRF is covered by X-CSRF + SameSite cookies
+        return origin === new URL(baseUrl(req)).origin;
+    };
+    const logError = (err: unknown) => console.error(rt.audit.redactText(err instanceof Error ? (err.stack ?? err.message) : String(err)));
 
     const botView = (user: User, e: BotEntry, prefs = repo.botPrefs(user.login)) => {
         const s = rt.status(user.login)[e.bot.id];
@@ -221,10 +240,11 @@ export function createAppServer(o: ServerOptions): Server {
     });
     route("POST", "/api/threads/:id/share", async ({ user, params, req }) => {
         rt.thread(user, params[0]!);
-        const token = randomToken(18);
-        repo.createShare(user.login, params[0]!, token);
-        rt.audit.log({ type: "thread.shared", threadId: params[0] }, { actor: user.login });
-        return { token, url: `${baseUrl(req)}/s/${token}` };
+        const token = randomToken(24);
+        const expiresAt = new Date(Date.now() + (o.shareTtlDays ?? 30) * 86400_000).toISOString();
+        repo.createShare(user.login, params[0]!, sha256(token), expiresAt);
+        rt.audit.log({ type: "thread.shared", threadId: params[0], expiresAt }, { actor: user.login });
+        return { token, url: `${baseUrl(req)}/s/${token}`, expiresAt };
     });
     route("DELETE", "/api/threads/:id/share", async ({ user, params, res }) => {
         rt.thread(user, params[0]!);
@@ -245,6 +265,7 @@ export function createAppServer(o: ServerOptions): Server {
         res.writeHead(200, {
             "Content-Type": "text/markdown; charset=utf-8",
             "Content-Disposition": `attachment; filename="${t.title.replace(/[^\w.-]+/g, "_").slice(0, 60) || "thread"}.md"`,
+            "Content-Security-Policy": "default-src 'none'; sandbox",
         }).end(lines.join("\n"));
     });
     route("GET", "/api/search", async ({ user, url }) => {
@@ -308,8 +329,9 @@ export function createAppServer(o: ServerOptions): Server {
     route("POST", "/api/memory", async ({ user, body, res }) => {
         const b = parse(MemoryInput, await body());
         if (b.botId) rt.requireBot(user, b.botId);
+        if (repo.countMemories(user.login) >= 500) throw new HttpError(422, "memory is full; delete something first");
         res.statusCode = 201;
-        return repo.addMemory(user.login, b.botId ?? null, b.text);
+        return repo.addMemory(user.login, b.botId ?? null, b.text.replace(/\s+/g, " ").trim(), "user");
     });
     route("PATCH", "/api/memory/:id", async ({ user, params, body }) => {
         const { text } = parse(z.object({ text: z.string().min(1).max(500) }).strict(), await body());
@@ -381,8 +403,10 @@ export function createAppServer(o: ServerOptions): Server {
 
     // ---------------------------------------------------------------- uploads
     route("POST", "/api/uploads", async ({ user, req, res }) => {
-        const name = decodeURIComponent(String(req.headers["x-filename"] ?? "file")).replace(/[/\\]/g, "_").slice(0, 200);
-        const mimeType = String(req.headers["content-type"] ?? "application/octet-stream").split(";")[0]!;
+        const name = decodeParam(String(req.headers["x-filename"] ?? "file"), "file name").replace(/[/\\\u0000-\u001f"]/g, "_").slice(0, 200) || "file";
+        const rawType = String(req.headers["content-type"] ?? "").split(";")[0]!.trim().toLowerCase();
+        const mimeType = /^[a-z0-9][a-z0-9!#$&^_.+-]{0,63}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,63}$/.test(rawType) ? rawType : "application/octet-stream";
+        if (repo.uploadBytes(user.login) >= maxStorage) throw new HttpError(413, "upload storage is full; delete old threads or ask an admin");
         const data = await readBody(req, maxUpload);
         const id = repo.addUpload(user.login, name, mimeType, data.length);
         await writeFile(rt.uploadPath(id), data);
@@ -392,7 +416,14 @@ export function createAppServer(o: ServerOptions): Server {
     route("GET", "/api/uploads/:id", async ({ user, params, res }) => {
         const u = repo.upload(user.login, params[0]!);
         if (!u) throw new HttpError(404, "upload not found");
-        res.writeHead(200, { "Content-Type": u.mimeType, "Content-Disposition": `inline; filename="${encodeURIComponent(u.name)}"`, "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "sandbox" });
+        // Only harmless types render inline; everything else downloads, so an uploaded HTML/SVG/PDF
+        // can never run in (or be framed by) this origin.
+        const inline = SAFE_INLINE_TYPES.has(u.mimeType);
+        res.writeHead(200, {
+            "Content-Type": inline ? u.mimeType : "application/octet-stream",
+            "Content-Disposition": `${inline ? "inline" : "attachment"}; filename*=UTF-8''${encodeURIComponent(u.name)}`,
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+        });
         createReadStream(rt.uploadPath(u.id)).pipe(res);
     });
 
@@ -418,17 +449,18 @@ export function createAppServer(o: ServerOptions): Server {
         if (!insideDir(root, file)) throw new HttpError(400, "path escapes the workspace");
         const s = await stat(file).catch(() => undefined);
         if (!s?.isFile()) throw new HttpError(404, "file not found");
-        res.writeHead(200, { "Content-Type": "application/octet-stream", "Content-Disposition": `attachment; filename="${encodeURIComponent(path.basename(file))}"` });
+        res.writeHead(200, { "Content-Type": "application/octet-stream", "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(path.basename(file))}`, "Content-Security-Policy": "default-src 'none'; sandbox" });
         createReadStream(file).pipe(res);
     });
     route("POST", "/api/computer/upload", async ({ user, req, res }) => {
         const root = rt.computerDir(user.login);
-        const rel = decodeURIComponent(String(req.headers["x-path"] ?? ""));
+        const rel = decodeParam(String(req.headers["x-path"] ?? ""), "path");
         const file = safeJoin(root, rel);
         if (file === root) throw new HttpError(400, "x-path is required");
         if (!insideDir(root, file)) throw new HttpError(400, "path escapes the workspace");
         await mkdir(path.dirname(file), { recursive: true });
-        await writeFile(file, await readBody(req, maxUpload));
+        if ((await dirBytes(root)) >= maxStorage) throw new HttpError(413, "the computer's storage is full");
+        await writeFile(file, await readBody(req, maxUpload), { mode: 0o600 });
         rt.audit.log({ type: "computer.upload", path: rel }, { actor: user.login });
         res.statusCode = 201;
         return { ok: true };
@@ -436,6 +468,14 @@ export function createAppServer(o: ServerOptions): Server {
 
     // ---------------------------------------------------------------- live events
     route("GET", "/api/events", async ({ user, req, res }) => {
+        const open = streams.get(user.login) ?? 0;
+        if (open >= MAX_STREAMS_PER_USER) throw new HttpError(429, "too many open event streams");
+        streams.set(user.login, open + 1);
+        req.on("close", () => {
+            const n = (streams.get(user.login) ?? 1) - 1;
+            if (n <= 0) streams.delete(user.login);
+            else streams.set(user.login, n);
+        });
         res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive", "X-Accel-Buffering": "no" });
         res.write(`event: hello\ndata: ${JSON.stringify({ statuses: rt.status(user.login) })}\n\n`);
         const unsubscribe = rt.hub.subscribe(user.login, (e) => res.write(`event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`));
@@ -491,6 +531,7 @@ export function createAppServer(o: ServerOptions): Server {
     // ---------------------------------------------------------------- request handling
     return createServer(async (req, res) => {
         const url = new URL(req.url ?? "/", "http://localhost");
+        setSecurityHeaders(res, url.pathname, o.hsts ?? false);
         try {
             if (req.method === "GET" && url.pathname === "/healthz") return send(res, 200, { ok: true });
 
@@ -503,20 +544,27 @@ export function createAppServer(o: ServerOptions): Server {
             if (!route_) throw new HttpError(404, "not found");
             const who = await auth.userFor(req);
             if (!who) throw new HttpError(401, "sign in required");
-            if (who.viaCookie && req.method !== "GET" && req.headers["x-csrf"] !== "1") throw new HttpError(403, "missing X-CSRF header");
+            if (who.viaCookie && req.method !== "GET" && (req.headers["x-csrf"] !== "1" || !sameOrigin(req))) throw new HttpError(403, "cross-site request refused");
+            if (!apiLimiter.take(who.user.login)) throw new HttpError(429, "too many requests; slow down");
+            if (req.method === "POST" && /\/(messages|tasks|run|draft-skill)$/.test(url.pathname) && !postLimiter.take(who.user.login)) {
+                throw new HttpError(429, "too many messages; slow down");
+            }
             rt.audit.trackSecret(who.user.githubToken);
 
             let cached: Promise<unknown> | undefined;
-            const params = route_[1].exec(url.pathname)!.slice(1).map(decodeURIComponent);
+            const params = route_[1].exec(url.pathname)!.slice(1).map((p) => decodeParam(p, "path"));
             const result = await route_[2]({ req, res, url, user: who.user, params, body: () => (cached ??= readJson(req)) });
             if (!res.headersSent && !res.writableEnded) send(res, res.statusCode, result);
         } catch (err) {
             if (res.headersSent) return void res.end();
-            if (err instanceof HttpError) return send(res, err.status, { error: err.message, details: err.details });
+            if (err instanceof HttpError) {
+                if (err.status === 429) res.setHeader("Retry-After", "60");
+                return send(res, err.status, { error: err.message, details: err.details });
+            }
             if (err instanceof NotFoundError) return send(res, 404, { error: err.message });
             if (err instanceof InvalidError || err instanceof DirectoryError) return send(res, 422, { error: err.message });
             if (err instanceof CatalogError) return send(res, 422, { error: "invalid bot", details: err.problems });
-            console.error(err);
+            logError(err);
             send(res, 500, { error: "internal error" });
         }
     });
@@ -536,11 +584,15 @@ export function createAppServer(o: ServerOptions): Server {
                 await auth.completeOAuth(req, res, url, redirectUri);
                 res.writeHead(302, { Location: "/" }).end();
             } catch (err) {
-                res.writeHead(302, { Location: `/?login_error=${encodeURIComponent((err as Error).message)}` }).end();
+                // Never reflect free text into the page: log the detail, send a fixed code.
+                logError(err);
+                res.writeHead(302, { Location: "/?login_error=oauth" }).end();
             }
             return;
         }
         if (req.method !== "POST" || req.headers["x-csrf"] !== "1") throw new HttpError(404, "not found");
+        if (!sameOrigin(req)) throw new HttpError(403, "cross-site request refused");
+        if (url.pathname !== "/auth/logout" && !authLimiter.take(clientIp(req))) throw new HttpError(429, "too many sign-in attempts; wait a minute");
         if (url.pathname === "/auth/token") {
             const { token } = parse(z.object({ token: z.string().min(10).max(500) }).strict(), await readJson(req));
             const user = await auth.signInWithToken(res, token.trim());
@@ -560,7 +612,8 @@ export function createAppServer(o: ServerOptions): Server {
     }
 
     function sharedThread(token: string) {
-        const s = repo.share(token);
+        if (!/^[A-Za-z0-9_-]{20,64}$/.test(token)) throw new HttpError(404, "this link is no longer shared");
+        const s = repo.share(sha256(token));
         const t = s && repo.thread(s.threadId);
         if (!s || !t) throw new HttpError(404, "this link is no longer shared");
         const owner = { login: s.owner, orgs: repo.user(s.owner)?.orgs ?? [] };
@@ -570,7 +623,11 @@ export function createAppServer(o: ServerOptions): Server {
                 return [id, b ? { name: b.name, title: b.title, avatar: b.avatar, color: b.color } : { name: id }];
             }),
         );
-        const messages = repo.messages(t.id).filter((m) => m.authorType !== "system" || !m.meta.approvalId).map((m) => ({ ...m, meta: { tools: m.meta.tools } }));
+        // Only the conversation itself: no approvals, tool arguments (URLs, commands, paths), attachments or ids.
+        const messages = repo
+            .messages(t.id)
+            .filter((m) => m.authorType !== "system")
+            .map((m) => ({ seq: m.seq, authorType: m.authorType, authorId: m.authorId, text: m.text, createdAt: m.createdAt, meta: { tools: m.meta.tools?.map((x) => ({ tool: x.tool })) } }));
         return { thread: { title: t.title, kind: t.kind, owner: t.owner, createdAt: t.createdAt }, bots, messages };
     }
 
@@ -590,11 +647,57 @@ export function createAppServer(o: ServerOptions): Server {
             "Content-Type": MIME[path.extname(file)] ?? "application/octet-stream",
             "Cache-Control": "no-cache",
             "X-Content-Type-Options": "nosniff",
-            "Content-Security-Policy":
-                "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'",
-            "Referrer-Policy": "same-origin",
+            "Content-Security-Policy": APP_CSP,
         });
         createReadStream(file).pipe(res);
+    }
+}
+
+/** Fixed-window counters, in memory (single node). Enough to blunt brute force and runaway clients. */
+export class RateLimiter {
+    private readonly windows = new Map<string, { count: number; reset: number }>();
+
+    constructor(
+        private readonly limit: number,
+        private readonly windowMs: number,
+    ) {}
+
+    /** True when the call is allowed. */
+    take(key: string, now = Date.now()): boolean {
+        if (this.windows.size > 50_000) for (const [k, w] of this.windows) if (w.reset <= now) this.windows.delete(k);
+        const w = this.windows.get(key);
+        if (!w || w.reset <= now) {
+            this.windows.set(key, { count: 1, reset: now + this.windowMs });
+            return true;
+        }
+        w.count += 1;
+        return w.count <= this.limit;
+    }
+}
+
+/** The web app's CSP: no inline script or style, Trusted Types for the one HTML sink (sanitized Markdown). */
+export const APP_CSP = [
+    "default-src 'self'",
+    "script-src 'self'",
+    "style-src 'self'",
+    "img-src 'self' data: blob:",
+    "connect-src 'self'",
+    "font-src 'self'",
+    "object-src 'none'",
+    "base-uri 'none'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+    "require-trusted-types-for 'script'",
+    "trusted-types dompurify",
+].join("; ");
+
+const SAFE_INLINE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "text/plain"]);
+
+function decodeParam(value: string, what: string): string {
+    try {
+        return decodeURIComponent(value);
+    } catch {
+        throw new HttpError(400, `malformed ${what}`);
     }
 }
 
@@ -618,6 +721,37 @@ export function safeJoin(root: string, rel: string): string {
     const full = path.resolve(root, "." + path.sep + rel.replace(/^[/\\]+/, ""));
     if (full !== root && !full.startsWith(root + path.sep)) throw new HttpError(400, "path escapes the workspace");
     return full;
+}
+
+/** Headers on every response; API responses also get a deny-all CSP and are never cached. */
+function setSecurityHeaders(res: ServerResponse, pathname: string, hsts: boolean): void {
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("X-Frame-Options", "DENY");
+    res.setHeader("Referrer-Policy", "no-referrer");
+    res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+    res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
+    res.setHeader("Permissions-Policy", "camera=(), geolocation=(), payment=(), usb=(), microphone=(self)");
+    if (hsts) res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+    if (pathname.startsWith("/api/") || pathname.startsWith("/auth/")) {
+        res.setHeader("Cache-Control", "no-store");
+        res.setHeader("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'; sandbox");
+    }
+}
+
+/** Total bytes under `dir` (stops counting at 100k entries). */
+async function dirBytes(dir: string): Promise<number> {
+    let total = 0;
+    let seen = 0;
+    const walk = async (d: string): Promise<void> => {
+        for (const e of await readdir(d, { withFileTypes: true }).catch(() => [])) {
+            if (++seen > 100_000) return;
+            const p = path.join(d, e.name);
+            if (e.isDirectory()) await walk(p);
+            else if (e.isFile()) total += (await stat(p).catch(() => undefined))?.size ?? 0;
+        }
+    };
+    await walk(dir);
+    return total;
 }
 
 function send(res: ServerResponse, status: number, body: unknown): void {

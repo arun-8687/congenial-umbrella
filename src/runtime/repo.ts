@@ -105,8 +105,11 @@ export interface Approval {
 export interface Memory {
     id: string;
     owner: string;
+    /** null = about the user, visible to all their bots; otherwise one bot's own notes. */
     botId: string | null;
     text: string;
+    /** "user" when the person wrote it, otherwise the id of the bot that saved it. */
+    source: string;
     createdAt: string;
 }
 
@@ -558,13 +561,16 @@ export class Repo {
         const rows = botId === undefined
             ? this.db.all<Row>("SELECT * FROM memories WHERE owner = ? ORDER BY created_at", owner)
             : this.db.all<Row>("SELECT * FROM memories WHERE owner = ? AND (bot_id IS NULL OR bot_id = ?) ORDER BY created_at", owner, botId);
-        return rows.map((r) => ({ id: str(r.id), owner: str(r.owner), botId: nstr(r.bot_id), text: str(r.text), createdAt: str(r.created_at) }));
+        return rows.map((r) => ({ id: str(r.id), owner: str(r.owner), botId: nstr(r.bot_id), text: str(r.text), source: str(r.source), createdAt: str(r.created_at) }));
     }
-    addMemory(owner: string, botId: string | null, text: string): Memory {
+    addMemory(owner: string, botId: string | null, text: string, source = "user"): Memory {
         const id = newId();
         const t = now();
-        this.db.run("INSERT INTO memories (id, owner, bot_id, text, created_at) VALUES (?, ?, ?, ?, ?)", id, owner, botId, text, t);
-        return { id, owner, botId, text, createdAt: t };
+        this.db.run("INSERT INTO memories (id, owner, bot_id, text, source, created_at) VALUES (?, ?, ?, ?, ?, ?)", id, owner, botId, text, source, t);
+        return { id, owner, botId, text, source, createdAt: t };
+    }
+    countMemories(owner: string): number {
+        return Number(this.db.get<Row>("SELECT COUNT(*) AS n FROM memories WHERE owner = ?", owner)?.n ?? 0);
     }
     updateMemory(owner: string, id: string, text: string): boolean {
         return this.db.run("UPDATE memories SET text = ? WHERE owner = ? AND id = ?", text, owner, id).changes > 0;
@@ -634,17 +640,21 @@ export class Repo {
         this.db.run("INSERT INTO uploads (id, owner, name, mime_type, size, created_at) VALUES (?, ?, ?, ?, ?, ?)", id, owner, name, mimeType, size, now());
         return id;
     }
+    uploadBytes(owner: string): number {
+        return Number(this.db.get<Row>("SELECT COALESCE(SUM(size), 0) AS n FROM uploads WHERE owner = ?", owner)?.n ?? 0);
+    }
     upload(owner: string, id: string): { id: string; name: string; mimeType: string; size: number } | undefined {
         const r = this.db.get<Row>("SELECT * FROM uploads WHERE owner = ? AND id = ?", owner, id);
         return r && { id: str(r.id), name: str(r.name), mimeType: str(r.mime_type), size: Number(r.size) };
     }
 
     // ---- share links
-    createShare(owner: string, threadId: string, token: string): void {
-        this.db.run("INSERT INTO share_links (token, owner, thread_id, created_at) VALUES (?, ?, ?, ?)", token, owner, threadId, now());
+    createShare(owner: string, threadId: string, tokenHash: string, expiresAt: string): void {
+        this.db.run("INSERT INTO share_links (token, owner, thread_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?)", tokenHash, owner, threadId, now(), expiresAt);
     }
-    share(token: string): { owner: string; threadId: string } | undefined {
-        const r = this.db.get<Row>("SELECT * FROM share_links WHERE token = ?", token);
+    /** Looks a share up by the hash of its token (tokens are never stored in the clear). */
+    share(tokenHash: string): { owner: string; threadId: string } | undefined {
+        const r = this.db.get<Row>("SELECT * FROM share_links WHERE token = ? AND (expires_at IS NULL OR expires_at > ?)", tokenHash, now());
         return r && { owner: str(r.owner), threadId: str(r.thread_id) };
     }
     deleteShares(owner: string, threadId: string): void {
@@ -695,6 +705,26 @@ export class Repo {
             this.db.run("DELETE FROM web_sessions WHERE login = ?", owner);
             this.db.run("DELETE FROM users WHERE login = ?", owner);
             return { uploads, sessions };
+        });
+    }
+
+    /** Re-seals every stored secret with the sealer's current key (after a key rotation). */
+    resealAll(reseal: (sealed: string) => string | undefined): number {
+        return this.db.tx(() => {
+            let n = 0;
+            const each = (select: string, update: string, col: string, keys: string[]) => {
+                for (const r of this.db.all<Row>(select)) {
+                    const next = reseal(str(r[col]));
+                    if (next !== undefined) {
+                        this.db.run(update, next, ...keys.map((k) => r[k] as string));
+                        n++;
+                    }
+                }
+            };
+            each("SELECT login, token_ciphertext FROM users", "UPDATE users SET token_ciphertext = ? WHERE login = ?", "token_ciphertext", ["login"]);
+            each("SELECT id_hash, token_ciphertext FROM web_sessions", "UPDATE web_sessions SET token_ciphertext = ? WHERE id_hash = ?", "token_ciphertext", ["id_hash"]);
+            each("SELECT owner, connector_id, ciphertext FROM credentials", "UPDATE credentials SET ciphertext = ? WHERE owner = ? AND connector_id = ?", "ciphertext", ["owner", "connector_id"]);
+            return n;
         });
     }
 

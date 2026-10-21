@@ -1,6 +1,9 @@
 # Copilot Bots: production image.
-# Bots with the Computer capability run shell commands inside this container, so run one
-# container per trust boundary and mount only what bots should see.
+# Runs as an unprivileged user with state in /data (mode 0700). Recommended:
+#   docker run --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges \
+#     -v bots-data:/data -e SECRET_KEY=... -e PUBLIC_URL=https://bots.example.com copilot-bots
+# The shared computer is off by default. COMPUTER_ACCESS=shell additionally requires
+# COMPUTER_SHELL_ISOLATED=1, which you should only set when each user's runtime is isolated.
 FROM node:22-bookworm-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
@@ -21,4 +24,5 @@ COPY workspace ./workspace
 USER bots
 VOLUME ["/data"]
 EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=5s CMD ["node", "-e", "fetch('http://127.0.0.1:'+(process.env.PORT||8080)+'/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
 CMD ["node", "--disable-warning=ExperimentalWarning", "dist/cli.js", "serve"]

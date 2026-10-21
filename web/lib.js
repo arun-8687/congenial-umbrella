@@ -160,7 +160,13 @@ DOMPurify.addHook("afterSanitizeAttributes", (node) => {
 
 /** Renders untrusted Markdown to sanitized DOM, highlights @mentions, and adds copy buttons to code. */
 export function markdown(text, opts = {}) {
-    const html = DOMPurify.sanitize(marked.parse(text ?? ""), { USE_PROFILES: { html: true }, FORBID_TAGS: ["style", "form", "input"], FORBID_ATTR: ["style"] });
+    // RETURN_TRUSTED_TYPE: the page enforces Trusted Types, so only DOMPurify's output can reach innerHTML.
+    const html = DOMPurify.sanitize(marked.parse(text ?? ""), {
+        USE_PROFILES: { html: true },
+        FORBID_TAGS: ["style", "form", "input", "button", "textarea", "select", "iframe", "object", "embed"],
+        FORBID_ATTR: ["style", "srcset"],
+        RETURN_TRUSTED_TYPE: true,
+    });
     const el = h("div.md");
     el.innerHTML = html;
     // Never auto-load remote images from bot output: a prompt-injected bot could encode data in the
@@ -302,6 +308,9 @@ export function confirmDialog(title, text, okLabel = "Confirm", danger = false) 
         ], { onClose: () => resolve(done) });
     });
 }
+
+/** Approval kinds a person may "always allow" on their own bots (mirrors the server rule). */
+export const ALWAYS_ALLOWABLE = ["read", "write", "url"];
 
 export function switchInput(checked, onChange, label) {
     const input = h("input", { type: "checkbox", checked, "aria-label": label, onChange: (e) => onChange(e.target.checked) });

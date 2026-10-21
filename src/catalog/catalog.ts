@@ -35,6 +35,7 @@ export class Catalog {
         const connectors = await loadYamlDir(path.join(root, "connectors"), ConnectorSpec, problems);
         const skills = await loadSkills(path.join(root, "skills"), problems);
         problems.push(...crossReferenceProblems(bots, connectors, skills));
+        problems.push(...connectorSecretProblems(connectors));
         if (problems.length > 0) throw new CatalogError(problems);
         return new Catalog(path.resolve(root), bots, connectors, skills);
     }
@@ -152,6 +153,25 @@ function crossReferenceProblems(
             if (b === "*") continue;
             if (b === bot.id) problems.push(`bot '${bot.id}': cannot list itself in canMessage`);
             else if (!bots.has(b)) problems.push(`bot '${bot.id}': canMessage references unknown bot '${b}'`);
+        }
+    }
+    return problems;
+}
+
+const SECRET_PLACEHOLDER = /\$\{(user\.githubToken|user\.credential|env:[A-Za-z_][A-Za-z0-9_]*)\}/;
+
+/**
+ * Secrets belong in `env` (stdio) or `headers` (http): command-line arguments are visible to every
+ * local user in the process list, and URLs end up in logs.
+ */
+function connectorSecretProblems(connectors: ReadonlyMap<string, ConnectorSpec>): string[] {
+    const problems: string[] = [];
+    for (const c of connectors.values()) {
+        if (c.type === "stdio") {
+            if (c.args.some((a) => SECRET_PLACEHOLDER.test(a))) problems.push(`connector '${c.id}': pass secrets through env, not args (args are visible in the process list)`);
+            if (c.workingDirectory && SECRET_PLACEHOLDER.test(c.workingDirectory)) problems.push(`connector '${c.id}': workingDirectory can't contain secrets`);
+        } else if (SECRET_PLACEHOLDER.test(c.url)) {
+            problems.push(`connector '${c.id}': pass secrets in headers, not the URL (URLs get logged)`);
         }
     }
     return problems;

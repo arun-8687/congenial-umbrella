@@ -53,6 +53,9 @@ export class CopilotEngine implements AgentEngine {
                 useLoggedInUser: false,
                 baseDirectory: options.baseDirectory,
                 logLevel: options.logLevel ?? "warning",
+                // Never let the runtime (and the shell commands and MCP servers it starts) inherit the
+                // platform's own secrets or a server-wide GitHub identity.
+                env: runtimeEnv(process.env),
             });
     }
 
@@ -173,6 +176,32 @@ export class CopilotEngine implements AgentEngine {
             onPermissionRequest: permissionHandler(req),
         };
     }
+}
+
+const ENV_ALLOW = [
+    /^PATH$/, /^HOME$/, /^USER$/, /^LOGNAME$/, /^SHELL$/, /^LANG$/, /^LANGUAGE$/, /^LC_[A-Z_]+$/, /^TZ$/, /^TERM$/,
+    /^TMPDIR$/, /^TEMP$/, /^TMP$/, /^XDG_[A-Z_]+$/,
+    /^(HTTPS?|ALL|NO)_PROXY$/i, /^NODE_EXTRA_CA_CERTS$/, /^SSL_CERT_(FILE|DIR)$/, /^REQUESTS_CA_BUNDLE$/,
+    /^COPILOT_[A-Z0-9_]+$/, /^PLAYWRIGHT_BROWSERS_PATH$/,
+    /^SystemRoot$/, /^ComSpec$/, /^PATHEXT$/, /^APPDATA$/, /^LOCALAPPDATA$/, /^USERPROFILE$/,
+];
+const ENV_DENY = /TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|PRIVATE|(^|_)KEY($|_)|AUTH/i;
+
+/**
+ * The environment for the Copilot runtime process: an allowlist of what a process needs to run,
+ * minus anything that looks like a credential. Connector secrets reach their MCP servers explicitly,
+ * through each connector's resolved `env`, never through the ambient environment.
+ */
+export function runtimeEnv(env: NodeJS.ProcessEnv): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(env)) {
+        if (v === undefined) continue;
+        if (!ENV_ALLOW.some((re) => re.test(k))) continue;
+        // Proxy URLs may embed credentials, but the runtime needs them to reach GitHub; keep them.
+        if (ENV_DENY.test(k) && !/_PROXY$/i.test(k)) continue;
+        out[k] = v;
+    }
+    return out;
 }
 
 function personaPreamble(bot: BotSpec, orgName?: string): string {

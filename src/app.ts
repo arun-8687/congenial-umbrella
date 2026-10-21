@@ -2,7 +2,7 @@ import type { Server } from "node:http";
 import { Auditor, JsonlAuditSink, type AuditSink } from "./audit.js";
 import { Catalog } from "./catalog/catalog.js";
 import type { Config } from "./config.js";
-import { Sealer } from "./crypto.js";
+import { Sealer, secureDir } from "./crypto.js";
 import { CopilotEngine } from "./engine/copilot.js";
 import { DemoEngine } from "./engine/demo.js";
 import type { AgentEngine } from "./engine/types.js";
@@ -31,9 +31,10 @@ export interface AppOverrides {
 /** Wires catalog, store, engine, runtime and HTTP server together. */
 export async function buildApp(config: Config, overrides: AppOverrides = {}): Promise<App> {
     const catalog = await Catalog.load(config.workspaceDir);
+    secureDir(config.stateDir);
     const db = new Db(config.dbFile);
     const repo = new Repo(db);
-    const sealer = Sealer.fromEnvOrFile(config.secretKey, config.stateDir);
+    const sealer = Sealer.fromEnvOrFile(config.secretKey, config.stateDir, config.secretKeyPrevious);
     const sink = overrides.auditSink ?? new JsonlAuditSink(config.auditDir);
     const audit = new Auditor(sink);
     for (const value of connectorEnvSecrets(catalog)) audit.trackSecret(value);
@@ -72,7 +73,18 @@ export async function buildApp(config: Config, overrides: AppOverrides = {}): Pr
         secureCookies: overrides.secureCookies ?? Boolean(config.publicUrl?.startsWith("https://")),
         onSignIn: (user) => runtime.rememberUser(user),
     });
-    const server = createAppServer({ runtime, auth, sealer, admins: config.admins, webDir: config.webDir, auditDir: config.auditDir, publicUrl: config.publicUrl });
+    const server = createAppServer({
+        runtime,
+        auth,
+        sealer,
+        admins: config.admins,
+        webDir: config.webDir,
+        auditDir: config.auditDir,
+        publicUrl: config.publicUrl,
+        maxStorageBytes: config.maxStorageBytes,
+        shareTtlDays: config.shareTtlDays,
+        hsts: Boolean(config.publicUrl?.startsWith("https://")),
+    });
 
     return {
         server,

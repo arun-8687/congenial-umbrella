@@ -61,6 +61,20 @@ try {
     await shot("login");
     await page.getByRole("button", { name: "Enter demo" }).click();
     await page.waitForSelector(".sidebar");
+    // Trusted Types are enforced: raw strings can't reach an HTML sink, only DOMPurify output can.
+    // The probe's own violation report is expected, so it is dropped from the error list.
+    const before = errors.length;
+    const ttEnforced = await page.evaluate(() => {
+        try {
+            document.createElement("div").innerHTML = "<b>raw</b>";
+            return false;
+        } catch {
+            return true;
+        }
+    });
+    await page.waitForTimeout(100);
+    errors.length = before;
+    if (!ttEnforced) errors.push("Trusted Types are not enforced");
     await shot("home");
 
     // Create bots from role templates
