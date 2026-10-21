@@ -19,7 +19,7 @@
     "validate": "tsx src/cli.ts validate",
     "smoke": "tsx scripts/smoke.ts",
     "e2e": "NODE_OPTIONS=--disable-warning=ExperimentalWarning tsx scripts/e2e.ts",
-    "demo": "ENGINE=demo DEV_LOGIN=1 ADMINS=alice NODE_OPTIONS=--disable-warning=ExperimentalWarning tsx src/cli.ts serve"
+    "demo": "ENGINE=demo DEV_LOGIN=1 ADMINS=alice COMPUTER_ACCESS=shell NODE_OPTIONS=--disable-warning=ExperimentalWarning tsx src/cli.ts serve"
   },
   "dependencies": {
     "@github/copilot-sdk": "^1.0.23",

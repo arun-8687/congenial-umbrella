@@ -48,7 +48,7 @@ export class Db {
 
     private migrate(): void {
         const version = (this.get<{ user_version: number }>("PRAGMA user_version")?.user_version ?? 0);
-        const steps = [SCHEMA_V1];
+        const steps = [SCHEMA_V1, SCHEMA_V2];
         for (let v = version; v < steps.length; v++) {
             this.tx(() => {
                 this.sql.exec(steps[v]!);
@@ -249,5 +249,16 @@ CREATE TABLE share_links (
     owner TEXT NOT NULL,
     thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
     created_at TEXT NOT NULL
+);
+`;
+
+/** v2: per-user sidebar organization (sections, hidden bots). */
+const SCHEMA_V2 = `
+CREATE TABLE bot_prefs (
+    owner TEXT NOT NULL,
+    bot_id TEXT NOT NULL,
+    section TEXT,
+    hidden INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (owner, bot_id)
 );
 `;

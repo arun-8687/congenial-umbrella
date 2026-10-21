@@ -202,7 +202,7 @@ describe("approvals", () => {
     };
 
     it("pauses the bot until the user approves", async () => {
-        const { runtime, repo, events } = await setup({ bots: [bot("ops", { computer: true })] }, { ops: shelly });
+        const { runtime, repo, events } = await setup({ bots: [bot("ops", { computer: true })] }, { ops: shelly }, { computerAccess: "shell" });
         const t = runtime.directThread(alice, "ops");
         runtime.postUserMessage(alice, t.id, "clean up");
         await waitFor(() => repo.approvals("alice", "pending").length === 1);
@@ -218,7 +218,7 @@ describe("approvals", () => {
     });
 
     it("reports denials and expiries back to the bot", async () => {
-        const { runtime, repo } = await setup({ bots: [bot("ops", { computer: true })] }, { ops: shelly }, { approvalTimeoutMs: 50 });
+        const { runtime, repo } = await setup({ bots: [bot("ops", { computer: true })] }, { ops: shelly }, { approvalTimeoutMs: 50, computerAccess: "shell" });
         const t = runtime.directThread(alice, "ops");
         runtime.postUserMessage(alice, t.id, "first");
         await waitFor(() => repo.approvals("alice", "pending").length === 1);
@@ -232,7 +232,7 @@ describe("approvals", () => {
     });
 
     it("never asks for denied kinds, and only lets users always-allow their own bots", async () => {
-        const { runtime, repo } = await setup({ bots: [bot("plain"), bot("orgops", { computer: true })] }, { plain: shelly, orgops: shelly });
+        const { runtime, repo } = await setup({ bots: [bot("plain"), bot("orgops", { computer: true })] }, { plain: shelly, orgops: shelly }, { computerAccess: "shell" });
         runtime.postUserMessage(alice, runtime.directThread(alice, "plain").id, "x");
         await runtime.idle();
         expect(repo.approvals("alice")).toEqual([]);
@@ -243,8 +243,8 @@ describe("approvals", () => {
     });
 
     it("always-allow updates a personal bot's policy", async () => {
-        const { runtime, repo, engine } = await setup({ bots: [] });
-        const mine = runtime.directory.savePersonalBot(alice, { name: "Box", description: "d", instructions: "i", computer: true }, { maxBotsAndGroups: 50 });
+        const { runtime, repo, engine } = await setup({ bots: [] }, {}, { computerAccess: "shell" });
+        const mine = runtime.directory.savePersonalBot(alice, { name: "Box", description: "d", instructions: "i", computer: true }, { maxBotsAndGroups: 50, computerAccess: "shell" });
         (engine as unknown as { scripts: Record<string, Script> }).scripts[mine.id] = shelly;
         const t = runtime.directThread(alice, mine.id);
         runtime.postUserMessage(alice, t.id, "x");

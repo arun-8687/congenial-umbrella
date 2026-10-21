@@ -26,6 +26,14 @@ export interface PermissionAsk {
     kind: string;
     /** Short human-readable description (URL, command, file, tool). */
     detail?: string;
+    /** read/write: the file the tool wants, as resolved by the runtime when it provides that. */
+    path?: string;
+    /** url: the address being fetched. */
+    url?: string;
+    /** mcp: the connector (server) and tool, and whether the server marks the tool read-only. */
+    server?: string;
+    tool?: string;
+    readOnly?: boolean;
 }
 
 export type PermissionVerdict = { decision: "approve" } | { decision: "reject"; feedback: string };
@@ -59,6 +67,8 @@ export interface TurnRequest {
      * as `${user.computerDir}` (e.g. a persistent browser profile).
      */
     computerDir?: string;
+    /** Offer the shell on the computer (deployment setting `COMPUTER_ACCESS=shell`). */
+    computerShell?: boolean;
     tools: PlatformTool[];
     prompt: string;
     attachments?: Attachment[];

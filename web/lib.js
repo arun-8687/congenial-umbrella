@@ -146,11 +146,33 @@ export function errorText(err) {
 // ------------------------------------------------------------------ markdown
 marked.setOptions({ gfm: true, breaks: true });
 
+const isLocalImage = (src) => src.startsWith("/") || src.startsWith("data:image/") || src.startsWith("blob:");
+// Runs while DOMPurify parses in its inert document, so a remote image URL never reaches the live
+// DOM, where merely creating the <img> would start a request (prompt-injection exfiltration).
+DOMPurify.addHook("afterSanitizeAttributes", (node) => {
+    if (node.nodeName !== "IMG") return;
+    const src = node.getAttribute("src") ?? "";
+    if (isLocalImage(src)) return;
+    node.setAttribute("data-remote-src", src);
+    node.removeAttribute("src");
+    node.removeAttribute("srcset");
+});
+
 /** Renders untrusted Markdown to sanitized DOM, highlights @mentions, and adds copy buttons to code. */
 export function markdown(text, opts = {}) {
     const html = DOMPurify.sanitize(marked.parse(text ?? ""), { USE_PROFILES: { html: true }, FORBID_TAGS: ["style", "form", "input"], FORBID_ATTR: ["style"] });
     const el = h("div.md");
     el.innerHTML = html;
+    // Never auto-load remote images from bot output: a prompt-injected bot could encode data in the
+    // URL. Show them as links the user can choose to open (the CSP blocks remote images too).
+    for (const img of el.querySelectorAll("img[data-remote-src]")) {
+        const src = img.getAttribute("data-remote-src") ?? "";
+        let host = "";
+        try {
+            host = new URL(src).hostname;
+        } catch {}
+        img.replaceWith(host ? h("a", { href: src }, `🖼 ${img.getAttribute("alt") || "image"} (${host})`) : document.createTextNode(img.getAttribute("alt") ?? ""));
+    }
     for (const a of el.querySelectorAll("a")) {
         a.target = "_blank";
         a.rel = "noopener noreferrer nofollow";

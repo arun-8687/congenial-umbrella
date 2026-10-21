@@ -37,9 +37,17 @@ async function botForm(title, initial, onSave, withTemplates) {
         instructions: h("textarea.input", { rows: 6, placeholder: "How it should work: goals, style, what to always or never do" }),
         model: h("input.input", { placeholder: "Platform default" }),
         effort: h("select.input", ["", "low", "medium", "high", "xhigh"].map((v) => h("option", { value: v }, v || "Default"))),
+        domains: h("input.input", { placeholder: "Any domain (e.g. docs.github.com, *.acme.com)" }),
     };
     const check = (value, label) => h("label", h("input", { type: "checkbox", value }), label);
-    const caps = h("div.checks", check("web_search", "Web search"), check("web_fetch", "Read web pages"), check("computer", "Computer (files & shell)"), check("memory", "Memory"));
+    const computerLabel = S.me.computerAccess === "shell" ? "Computer (files & shell)" : "Computer (files)";
+    const caps = h(
+        "div.checks",
+        check("web_search", "Web search"),
+        check("web_fetch", "Read web pages"),
+        S.me.computerAccess !== "off" || initial.computer ? check("computer", computerLabel) : null,
+        check("memory", "Memory"),
+    );
     const skillChecks = h("div.checks", skills.length ? skills.map((s) => check(s, s)) : h("span.small.muted", "No skills yet"));
     const connChecks = h("div.checks", connectors.length ? connectors.map((c) => check(c.id, c.name)) : h("span.small.muted", "No connectors configured"));
     const others = S.bots.filter((b) => b.id !== initial.id);
@@ -58,6 +66,7 @@ async function botForm(title, initial, onSave, withTemplates) {
         f.instructions.value = spec.instructions ?? "";
         f.model.value = spec.model ?? "";
         f.effort.value = spec.reasoningEffort ?? "";
+        f.domains.value = (spec.allowedDomains ?? []).join(", ");
         const capsOn = new Set([...(spec.builtinTools ?? []), spec.computer ? "computer" : null, spec.memory !== false ? "memory" : null]);
         for (const i of caps.querySelectorAll("input")) i.checked = capsOn.has(i.value);
         for (const i of skillChecks.querySelectorAll("input")) i.checked = (spec.skills ?? []).includes(i.value);
@@ -80,6 +89,7 @@ async function botForm(title, initial, onSave, withTemplates) {
             instructions: f.instructions.value.trim() || f.description.value.trim(),
             ...(f.model.value.trim() ? { model: f.model.value.trim() } : {}),
             ...(f.effort.value ? { reasoningEffort: f.effort.value } : {}),
+            ...(f.domains.value.trim() ? { allowedDomains: f.domains.value.split(/[\s,]+/).filter(Boolean) } : {}),
             builtinTools: ["web_search", "web_fetch"].filter((t) => capsOn.has(t)),
             computer: capsOn.has("computer"),
             memory: capsOn.has("memory"),
@@ -124,7 +134,12 @@ async function botForm(title, initial, onSave, withTemplates) {
             h("div.checks", h("label", worksAll, "All my bots"), h("label", worksSome, "Only these"), h("label", worksNone, "Works alone")),
             teamChecks,
         ),
-        h("details", h("summary.small.muted", "Model"), h("div.row", { style: { marginTop: "10px" } }, h("label.field", "Model", f.model), h("label.field", "Reasoning effort", f.effort))),
+        h(
+            "details",
+            h("summary.small.muted", "Advanced: model and web access"),
+            h("div.row", { style: { marginTop: "10px" } }, h("label.field", "Model", f.model), h("label.field", "Reasoning effort", f.effort)),
+            h("label.field", { style: { marginTop: "10px" } }, "Allowed web domains", h("span.help", "Limits which sites the bot can read, so a malicious page can't make it send your data elsewhere."), f.domains),
+        ),
     );
     const saveBtn = h("button.btn.primary", { type: "submit" }, withTemplates ? "Create bot" : "Save");
     const m = modal(title, body, [h("button.btn.ghost", { type: "button", onClick: () => m.close() }, "Cancel"), saveBtn], { wide: true });

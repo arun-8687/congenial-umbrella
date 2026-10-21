@@ -10,3 +10,8 @@ args:
   - "--user-data-dir"
   - "${user.computerDir}/.browser-profile"
 timeoutMs: 120000
+# The browser runs on the platform host and can reach whatever the host can reach. Grant it
+# explicitly (users/orgs) and restrict egress at the network layer before opening it up.
+access:
+  users: []
+requireApproval: writes

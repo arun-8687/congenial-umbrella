@@ -78,7 +78,7 @@ export class DemoEngine implements AgentEngine {
             notes.push(await call(routine, { name: titleFrom(latest.text), prompt: latest.text, schedule: "0 9 * * 1-5" }));
         }
 
-        if (req.bot.computer && req.computerDir && /\brun\b|script/.test(lastUser)) {
+        if (req.bot.computer && req.computerShell && req.computerDir && /\brun\b|script/.test(lastUser)) {
             const verdict = await req.decidePermission({ kind: "shell", detail: "$ ls -la && echo hello > hello.txt" });
             if (verdict.decision === "approve") {
                 req.onEvent?.({ type: "tool.start", tool: "bash", args: { command: "ls -la && echo hello > hello.txt" } });

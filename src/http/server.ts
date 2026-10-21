@@ -2,11 +2,13 @@ import { createReadStream, existsSync } from "node:fs";
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { Catalog, CatalogError } from "../catalog/catalog.js";
 import { derivedPermissions, type BotSpec } from "../catalog/schema.js";
 import { randomToken } from "../crypto.js";
-import type { User } from "../identity.js";
+import { canUseConnector, type User } from "../identity.js";
+import { insideDir } from "../engine/policy.js";
 import { DirectoryError, type BotEntry } from "../runtime/directory.js";
 import type { Thread } from "../runtime/repo.js";
 import { InvalidError, NotFoundError, type Runtime } from "../runtime/runtime.js";
@@ -87,9 +89,12 @@ export function createAppServer(o: ServerOptions): Server {
     const maxUpload = o.maxUploadBytes ?? 20_000_000;
     const baseUrl = (req: IncomingMessage) => o.publicUrl ?? `http://${req.headers.host ?? "localhost"}`;
 
-    const botView = (user: User, e: BotEntry) => {
+    const botView = (user: User, e: BotEntry, prefs = repo.botPrefs(user.login)) => {
         const s = rt.status(user.login)[e.bot.id];
+        const pref = prefs.get(e.bot.id);
         return {
+            section: pref?.section ?? null,
+            hidden: pref?.hidden ?? false,
             ...e.bot,
             scope: e.scope,
             editable: e.scope === "personal",
@@ -111,8 +116,14 @@ export function createAppServer(o: ServerOptions): Server {
         orgs: user.orgs,
         admin: isAdmin(user),
         instructions: repo.user(user.login)?.instructions ?? "",
+        computerAccess: rt.options.computerAccess,
         limits: { botsAndGroups: rt.options.maxBotsAndGroups, groupSize: rt.options.maxGroupSize, routinesPerBot: rt.options.maxRoutinesPerBot },
     }));
+    route("DELETE", "/api/me", async ({ user, req, res }) => {
+        await rt.deleteUserData(user);
+        o.auth.signOut(req, res);
+        res.statusCode = 204;
+    });
     route("PUT", "/api/me/instructions", async ({ user, body }) => {
         const { instructions } = parse(z.object({ instructions: z.string().max(4000) }).strict(), await body());
         repo.setUserInstructions(user.login, instructions);
@@ -120,7 +131,17 @@ export function createAppServer(o: ServerOptions): Server {
     });
 
     // ---------------------------------------------------------------- bots
-    route("GET", "/api/bots", async ({ user }) => ({ bots: rt.directory.bots(user).map((e) => botView(user, e)) }));
+    route("GET", "/api/bots", async ({ user }) => {
+        const prefs = repo.botPrefs(user.login);
+        return { bots: rt.directory.bots(user).map((e) => botView(user, e, prefs)) };
+    });
+    route("PUT", "/api/bots/:id/prefs", async ({ user, params, body }) => {
+        const b = parse(z.object({ section: z.string().trim().max(40).nullable().optional(), hidden: z.boolean().optional() }).strict(), await body());
+        const entry = rt.requireBot(user, params[0]!);
+        const cur = repo.botPrefs(user.login).get(entry.bot.id) ?? { section: null, hidden: false };
+        repo.setBotPrefs(user.login, entry.bot.id, { section: b.section === undefined ? cur.section : b.section || null, hidden: b.hidden ?? cur.hidden });
+        return botView(user, entry);
+    });
     route("GET", "/api/bot-templates", async () => {
         const c = rt.directory.catalog;
         return {
@@ -130,6 +151,7 @@ export function createAppServer(o: ServerOptions): Server {
                     ...t.bot,
                     skills: (t.bot.skills ?? []).filter((s) => c.skills.has(s)),
                     connectors: (t.bot.connectors ?? []).filter((x) => c.connectors.has(x)),
+                    computer: Boolean(t.bot.computer) && rt.options.computerAccess !== "off",
                 },
             })),
         };
@@ -137,7 +159,7 @@ export function createAppServer(o: ServerOptions): Server {
     route("POST", "/api/bots", async ({ user, body, res }) => {
         const input = parse(BotInput, await body());
         delete input.id;
-        const bot = rt.directory.savePersonalBot(user, input, { maxBotsAndGroups: rt.options.maxBotsAndGroups });
+        const bot = rt.directory.savePersonalBot(user, input, { maxBotsAndGroups: rt.options.maxBotsAndGroups, computerAccess: rt.options.computerAccess });
         rt.audit.log({ type: "bot.created", botId: bot.id }, { actor: user.login });
         rt.hub.publish(user.login, { type: "bots.changed" });
         res.statusCode = 201;
@@ -145,15 +167,13 @@ export function createAppServer(o: ServerOptions): Server {
     });
     route("PUT", "/api/bots/:id", async ({ user, params, body }) => {
         const input = parse(BotInput, await body());
-        const bot = rt.directory.savePersonalBot(user, { ...input, id: params[0] }, { maxBotsAndGroups: rt.options.maxBotsAndGroups });
+        const bot = rt.directory.savePersonalBot(user, { ...input, id: params[0] }, { maxBotsAndGroups: rt.options.maxBotsAndGroups, computerAccess: rt.options.computerAccess });
         rt.audit.log({ type: "bot.updated", botId: bot.id }, { actor: user.login });
         rt.hub.publish(user.login, { type: "bots.changed" });
         return botView(user, { bot, scope: "personal" });
     });
     route("DELETE", "/api/bots/:id", async ({ user, params, res }) => {
-        if (!repo.deletePersonalBot(user.login, params[0]!)) throw new HttpError(404, "bot not found");
-        rt.audit.log({ type: "bot.deleted", botId: params[0] }, { actor: user.login });
-        rt.hub.publish(user.login, { type: "bots.changed" });
+        if (!rt.deletePersonalBot(user, params[0]!)) throw new HttpError(404, "bot not found");
         res.statusCode = 204;
     });
     route("POST", "/api/bots/:id/dm", async ({ user, params }) => threadView(rt.directThread(user, params[0]!)));
@@ -170,10 +190,15 @@ export function createAppServer(o: ServerOptions): Server {
     });
     route("GET", "/api/threads/:id", async ({ user, params, url }) => {
         const t = rt.thread(user, params[0]!);
-        const after = Number(url.searchParams.get("after") ?? 0);
+        const after = url.searchParams.get("after");
+        const before = url.searchParams.get("before");
+        const limit = Math.min(500, Math.max(1, Number(url.searchParams.get("limit") ?? 200)));
+        // `after` catches up a live view (e.g. after a reconnect); otherwise the newest page, or the page before `before`.
+        const messages = after !== null ? repo.messages(t.id, { afterSeq: Number(after), limit: 500 }) : repo.latestMessages(t.id, limit, before ? Number(before) : undefined);
         return {
             thread: threadView(t),
-            messages: repo.messages(t.id, { afterSeq: after }),
+            messages,
+            hasEarlier: messages.length > 0 && messages[0]!.seq > 1 && after === null,
             approvals: repo.approvals(user.login).filter((a) => a.threadId === t.id),
             task: t.kind === "task" ? repo.taskByThread(t.id) ?? null : null,
         };
@@ -317,7 +342,7 @@ export function createAppServer(o: ServerOptions): Server {
 
     // ---------------------------------------------------------------- connectors
     route("GET", "/api/connectors", async ({ user }) => ({
-        connectors: [...rt.directory.catalog.connectors.values()].map((c) => {
+        connectors: [...rt.directory.catalog.connectors.values()].filter((c) => canUseConnector(user, c)).map((c) => {
             const cred = c.auth ? repo.credential(user.login, c.id) : undefined;
             return {
                 id: c.id,
@@ -327,12 +352,13 @@ export function createAppServer(o: ServerOptions): Server {
                 auth: c.auth ?? null,
                 status: c.auth ? (cred?.status ?? "not_connected") : "managed",
                 updatedAt: cred?.updatedAt ?? null,
+                requireApproval: c.requireApproval,
             };
         }),
     }));
     route("PUT", "/api/connectors/:id/credential", async ({ user, params, body }) => {
         const c = rt.directory.catalog.connectors.get(params[0]!);
-        if (!c?.auth) throw new HttpError(404, "connector does not take a credential");
+        if (!c?.auth || !canUseConnector(user, c)) throw new HttpError(404, "connector does not take a credential");
         const { secret } = parse(z.object({ secret: z.string().min(1).max(10_000) }).strict(), await body());
         repo.saveCredential(user.login, c.id, o.sealer.seal(secret));
         rt.audit.trackSecret(secret);
@@ -375,6 +401,7 @@ export function createAppServer(o: ServerOptions): Server {
         const root = rt.computerDir(user.login);
         const dir = safeJoin(root, url.searchParams.get("path") ?? "");
         if (!existsSync(dir)) return { path: path.relative(root, dir), entries: [] };
+        if (!insideDir(root, dir)) throw new HttpError(400, "path escapes the workspace");
         const entries = await Promise.all(
             (await readdir(dir, { withFileTypes: true })).slice(0, 500).map(async (e) => {
                 const s = await stat(path.join(dir, e.name)).catch(() => undefined);
@@ -385,7 +412,10 @@ export function createAppServer(o: ServerOptions): Server {
         return { path: path.relative(root, dir), entries };
     });
     route("GET", "/api/computer/file", async ({ user, url, res }) => {
-        const file = safeJoin(rt.computerDir(user.login), url.searchParams.get("path") ?? "");
+        const root = rt.computerDir(user.login);
+        const file = safeJoin(root, url.searchParams.get("path") ?? "");
+        // Bots can create symlinks with the shell; follow them before serving anything.
+        if (!insideDir(root, file)) throw new HttpError(400, "path escapes the workspace");
         const s = await stat(file).catch(() => undefined);
         if (!s?.isFile()) throw new HttpError(404, "file not found");
         res.writeHead(200, { "Content-Type": "application/octet-stream", "Content-Disposition": `attachment; filename="${encodeURIComponent(path.basename(file))}"` });
@@ -396,6 +426,7 @@ export function createAppServer(o: ServerOptions): Server {
         const rel = decodeURIComponent(String(req.headers["x-path"] ?? ""));
         const file = safeJoin(root, rel);
         if (file === root) throw new HttpError(400, "x-path is required");
+        if (!insideDir(root, file)) throw new HttpError(400, "path escapes the workspace");
         await mkdir(path.dirname(file), { recursive: true });
         await writeFile(file, await readBody(req, maxUpload));
         rt.audit.log({ type: "computer.upload", path: rel }, { actor: user.login });
@@ -560,7 +591,7 @@ export function createAppServer(o: ServerOptions): Server {
             "Cache-Control": "no-cache",
             "X-Content-Type-Options": "nosniff",
             "Content-Security-Policy":
-                "default-src 'self'; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'",
+                "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'",
             "Referrer-Policy": "same-origin",
         });
         createReadStream(file).pipe(res);
@@ -579,7 +610,7 @@ const MIME: Record<string, string> = {
 };
 
 function require_(spec: string): string {
-    return path.join(path.dirname(new URL(import.meta.url).pathname), "..", "..", "node_modules", spec);
+    return path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "node_modules", spec);
 }
 
 /** Resolves `rel` under `root`, refusing anything that escapes it. */

@@ -43,6 +43,11 @@ export const BotSpec = z
         model: z.string().min(1).optional(),
         reasoningEffort: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
         builtinTools: z.array(BuiltinTool).default([]),
+        /**
+         * Domains web_fetch may reach (e.g. `docs.github.com`, `*.example.com`). Omit for any domain.
+         * Limits where a prompt-injected bot can send data.
+         */
+        allowedDomains: z.array(z.string().regex(/^(\*\.)?[a-z0-9.-]+$/i)).optional(),
         skills: z.array(Id).default([]),
         connectors: z.array(Id).default([]),
         /** Bot ids this bot may message or hand tasks to; `"*"` means any bot the user can use. */
@@ -91,6 +96,19 @@ const ConnectorBase = {
     /** MCP tool names to expose; omit or `["*"]` for all. */
     tools: z.array(z.string().min(1)).optional(),
     timeoutMs: z.number().int().positive().optional(),
+    /**
+     * Who may put this connector on their personal bots. Org bots that list it can always use it.
+     * Defaults to everyone, except connectors that embed org secrets (`${env:...}`), which default
+     * to nobody so a shared credential is never handed to arbitrary users.
+     */
+    access: AccessSpec.optional(),
+    /**
+     * When a tool call waits for the user's approval: `writes` (default) asks for every tool the
+     * server does not mark read-only; `always` asks for every call; `never` asks for none.
+     */
+    requireApproval: z.enum(["writes", "always", "never"]).default("writes"),
+    /** Tool names (or `prefix*` patterns) that never need approval, e.g. `["search_*", "get_*"]`. */
+    allowTools: z.array(z.string().min(1)).default([]),
 };
 
 export const ConnectorSpec = z.discriminatedUnion("type", [
@@ -114,6 +132,16 @@ export const ConnectorSpec = z.discriminatedUnion("type", [
         .strict(),
 ]);
 export type ConnectorSpec = z.infer<typeof ConnectorSpec>;
+
+/** True when the connector carries an org secret from the server environment. */
+export function usesOrgSecrets(c: ConnectorSpec): boolean {
+    return JSON.stringify(c).includes("${env:");
+}
+
+/** Matches `name` against exact names and `prefix*` patterns. */
+export function matchesToolPattern(name: string, patterns: string[]): boolean {
+    return patterns.some((p) => (p.endsWith("*") ? name.startsWith(p.slice(0, -1)) : p === name));
+}
 
 export const SkillFrontmatter = z
     .object({

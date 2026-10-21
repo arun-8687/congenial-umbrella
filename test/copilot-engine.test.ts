@@ -31,6 +31,7 @@ async function setup() {
             skills: b.skills.map((s) => catalog.skills.get(s)!),
             connectors: b.connectors.map((c) => ({ spec: catalog.connectors.get(c)!, ...(c === "jira" ? { credential: "jira-cred-1" } : {}) })),
             computerDir: b.computer ? "/srv/computers/alice" : undefined,
+            computerShell: b.computer,
             tools: [],
             decidePermission: async () => ({ decision: "approve" as const }),
             ...extra,
@@ -50,6 +51,9 @@ describe("CopilotEngine.sessionConfig", () => {
         const available = (config.availableTools as { toArray(): string[] }).toArray();
         expect(available.slice(0, 4)).toEqual(["custom:*", "builtin:web_fetch", "builtin:skill", "mcp:*"]);
         expect(available).toEqual(expect.arrayContaining(["builtin:bash", "builtin:view", "builtin:edit"]));
+        const filesOnly = (engine.sessionConfig(req("full", { computerShell: false })).availableTools as { toArray(): string[] }).toArray();
+        expect(filesOnly).toContain("builtin:view");
+        expect(filesOnly.some((t) => t.includes("bash"))).toBe(false);
         expect(available.some((t) => t.includes("web_search"))).toBe(false);
         expect(config.tools?.map((t) => [t.name, t.skipPermission])).toEqual([["ask_bot", true]]);
 
@@ -107,7 +111,16 @@ describe("CopilotEngine.sessionConfig", () => {
         const inv = { sessionId: "s" };
         expect(await decide({ kind: "url", url: "https://example.com" } as never, inv)).toEqual({ kind: "approve-once" });
         expect(await decide({ kind: "shell", fullCommandText: "rm -rf /" } as never, inv)).toEqual({ kind: "reject", feedback: "no" });
-        expect(asked).toEqual([{ kind: "url", detail: "https://example.com" }, { kind: "shell", detail: "$ rm -rf /" }]);
+        expect(asked).toEqual([
+            expect.objectContaining({ kind: "url", detail: "https://example.com", url: "https://example.com" }),
+            expect.objectContaining({ kind: "shell", detail: "$ rm -rf /" }),
+        ]);
+        await decide({ kind: "mcp", serverName: "github", toolName: "merge_pull_request", readOnly: false } as never, inv);
+        await decide({ kind: "read", path: "notes.md", resolvedPath: "/srv/computers/alice/notes.md" } as never, inv);
+        expect(asked.slice(2)).toEqual([
+            expect.objectContaining({ kind: "mcp", server: "github", tool: "merge_pull_request", readOnly: false }),
+            expect.objectContaining({ kind: "read", path: "/srv/computers/alice/notes.md" }),
+        ]);
         expect(events).toContainEqual({ type: "permission", kind: "shell", decision: "reject", detail: "$ rm -rf /" });
     });
 });

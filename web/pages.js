@@ -27,12 +27,13 @@ export async function renderHome(root) {
                             h(
                                 "div.tags",
                                 b.scope === "org" ? h("span.tag", "Org") : h("span.tag", "Mine"),
+                                b.hidden ? h("span.tag.warn", "Hidden from sidebar") : null,
                                 (b.builtinTools ?? []).includes("web_search") ? h("span.tag", "Web") : null,
                                 b.computer ? h("span.tag", "Computer") : null,
                                 (b.skills ?? []).length ? h("span.tag", `${b.skills.length} skills`) : null,
                                 (b.connectors ?? []).length ? h("span.tag", b.connectors.join(", ")) : null,
                             ),
-                            h("div", { style: { display: "flex", gap: "8px", marginTop: "12px" } }, h("button.btn.sm.primary", { type: "button", onClick: () => navigate(`#/bot/${b.id}`) }, "Message"), h("button.btn.sm", { type: "button", onClick: () => setProfile(b.id) }, "Profile")),
+                            h("div", { style: { display: "flex", gap: "8px", marginTop: "12px" } }, h("button.btn.sm.primary", { type: "button", onClick: () => navigate(`#/bot/${b.id}`) }, "Message"), h("button.btn.sm", { type: "button", onClick: () => setProfile(b.id) }, "Profile"), b.hidden ? h("button.btn.sm.ghost", { type: "button", onClick: async () => { await put(`/api/bots/${b.id}/prefs`, { hidden: false }); await refreshBots(); draw(); } }, "Show in sidebar") : null),
                         ),
                     ),
                     h("button.card", { type: "button", onClick: () => openNewBot(), style: { display: "grid", placeItems: "center", minHeight: "180px", color: "var(--muted)", borderStyle: "dashed", cursor: "pointer" } }, h("div", { style: { textAlign: "center" } }, icon("plus", { width: "1.5" }), h("div", "Create a bot"))),
@@ -333,6 +334,7 @@ export async function renderConnectors(root) {
                                   "div.card",
                                   h("div.card-head", h("div.avatar", { style: { background: "var(--surface-2)", color: "var(--text)" } }, icon("plug")), h("div.grow", h("h3", c.name), h("div.meta", c.type.toUpperCase()))),
                                   h("p.small", { style: { color: "var(--text-2)" } }, c.description),
+                                  h("p.small.muted", { style: { margin: "0 0 8px" } }, c.requireApproval === "never" ? "Bots use it without asking." : c.requireApproval === "always" ? "Bots ask you before every call." : "Bots ask you before any action that changes something; reading is automatic."),
                                   c.status === "managed"
                                       ? h("span.tag.ok", "Ready — uses your GitHub sign-in or org credentials")
                                       : h(
@@ -456,6 +458,16 @@ export async function renderSettings(root) {
                           )
                         : null,
                 ),
+                h("h3", { style: { marginTop: "28px", color: "var(--danger)" } }, "Delete my data"),
+                h(
+                    "div.card",
+                    h("p.small", { style: { marginTop: 0 } }, "Deletes your threads, personal bots, memory, routines, skills, connector sign-ins, uploads, computer files and your stored GitHub sign-in. Audit records are kept, as your organization requires."),
+                    h("button.btn.danger", { type: "button", onClick: async () => {
+                        if (!(await confirmDialog("Delete all your data?", "This can't be undone. You'll be signed out.", "Delete everything", true))) return;
+                        await del("/api/me");
+                        location.href = "/";
+                    } }, "Delete all my data"),
+                ),
             ),
         );
     };
@@ -498,6 +510,28 @@ export async function renderAdmin(root) {
     return () => {};
 }
 
+function sidebarPrefs(b, redraw) {
+    const sections = [...new Set(S.bots.map((x) => x.section).filter(Boolean))];
+    const section = h("input.input", { value: b.section ?? "", placeholder: "Bots", list: "section-names", maxLength: 40 });
+    const save = async (patchBody) => {
+        try {
+            const updated = await put(`/api/bots/${b.id}/prefs`, patchBody);
+            Object.assign(b, { section: updated.section, hidden: updated.hidden });
+            await refreshBots();
+            void redraw();
+        } catch (err) {
+            toast("Could not save", errorText(err), { error: true });
+        }
+    };
+    section.addEventListener("change", () => save({ section: section.value.trim() || null }));
+    return h(
+        "div.kv",
+        h("span.k", "Sidebar"),
+        h("label.field", h("span.help", "Section"), section, h("datalist#section-names", sections.map((x) => h("option", { value: x })))),
+        h("label", { style: { display: "flex", gap: "10px", alignItems: "center", marginTop: "6px" } }, switchInput(Boolean(b.hidden), (v) => save({ hidden: v }), "Hide from sidebar"), h("span.small", "Hide from sidebar")),
+    );
+}
+
 // ====================================================================== Bot profile panel
 export async function renderProfile(el, botId) {
     const b = bot(botId);
@@ -533,6 +567,8 @@ export async function renderProfile(el, botId) {
                 h("div.kv", h("span.k", "Skills"), h("div.tags", (b.skills ?? []).length ? b.skills.map((s) => h("span.tag", s)) : h("span.small.muted", "None"))),
                 h("div.kv", h("span.k", "Connectors"), h("div.tags", (b.connectors ?? []).length ? b.connectors.map((s) => h("span.tag", s)) : h("span.small.muted", "None"))),
                 h("div.kv", h("span.k", "Works with"), h("div.tags", (b.canMessage ?? []).length ? b.canMessage.map((id) => h("span.tag", id === "*" ? "All my bots" : botName(id))) : h("span.small.muted", "Works alone"))),
+                b.allowedDomains?.length ? h("div.kv", h("span.k", "Web access"), h("div.tags", b.allowedDomains.map((d) => h("span.tag", d)))) : null,
+                sidebarPrefs(b, draw),
             );
         } else if (tab === "memory") {
             const { memories } = await get("/api/memory");

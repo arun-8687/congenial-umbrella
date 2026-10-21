@@ -1,7 +1,8 @@
 import { randomBytes } from "node:crypto";
 import type { Catalog } from "../catalog/catalog.js";
 import { BotSpec, type SkillSpec } from "../catalog/schema.js";
-import { canUseBot, type User } from "../identity.js";
+import type { ComputerAccess } from "../engine/policy.js";
+import { canUseBot, canUseConnector, type User } from "../identity.js";
 import type { Repo } from "./repo.js";
 
 export class DirectoryError extends Error {}
@@ -63,8 +64,13 @@ export class Directory {
     }
 
     /** Validates and stores a personal bot. New bots get a fresh id derived from the name. */
-    savePersonalBot(user: Pick<User, "login" | "orgs">, input: Record<string, unknown>, opts: { maxBotsAndGroups: number }): BotSpec {
+    savePersonalBot(
+        user: Pick<User, "login" | "orgs">,
+        input: Record<string, unknown>,
+        opts: { maxBotsAndGroups: number; computerAccess?: ComputerAccess },
+    ): BotSpec {
         const existingId = typeof input.id === "string" ? input.id : undefined;
+        const before = existingId ? this.repo.personalBots(user.login).find((b) => b.id === existingId) : undefined;
         let id = existingId;
         if (existingId) {
             if (this.repo.personalBotOwner(existingId) !== user.login) throw new DirectoryError(`bot ${existingId} not found`);
@@ -82,7 +88,14 @@ export class Directory {
 
         const problems: string[] = [];
         for (const s of bot.skills) if (!this.catalog.skills.has(s) && !this.repo.userSkill(user.login, s)) problems.push(`unknown skill '${s}'`);
-        for (const c of bot.connectors) if (!this.catalog.connectors.has(c)) problems.push(`unknown connector '${c}'`);
+        for (const c of bot.connectors) {
+            const spec = this.catalog.connectors.get(c);
+            if (!spec) problems.push(`unknown connector '${c}'`);
+            else if (!canUseConnector(user, spec) && !before?.connectors.includes(c)) problems.push(`you can't use connector '${c}'`);
+        }
+        if (bot.computer && !before?.computer && (opts.computerAccess ?? "off") === "off") {
+            problems.push("the shared computer is turned off on this platform");
+        }
         for (const b of bot.canMessage) if (b !== "*" && b !== bot.id && !this.bot(user, b)) problems.push(`unknown bot '${b}'`);
         if (problems.length) throw new DirectoryError(problems.join("; "));
 

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { BotSpec } from "./catalog/schema.js";
+import { usesOrgSecrets, type AccessSpec, type BotSpec, type ConnectorSpec } from "./catalog/schema.js";
 
 /** The person a request runs as. Every Copilot turn and connector call uses their token. */
 export interface User {
@@ -63,8 +63,18 @@ export class GitHubAuthenticator implements Authenticator {
 }
 
 export function canUseBot(user: Pick<User, "login" | "orgs">, bot: BotSpec): boolean {
+    return matchesAccess(user, bot.access);
+}
+
+/** Whether the user may attach the connector to their own (personal) bots. */
+export function canUseConnector(user: Pick<User, "login" | "orgs">, c: ConnectorSpec): boolean {
+    if (c.access) return matchesAccess(user, c.access);
+    return !usesOrgSecrets(c);
+}
+
+function matchesAccess(user: Pick<User, "login" | "orgs">, access: AccessSpec): boolean {
     const login = user.login.toLowerCase();
-    if (bot.access.users.some((u) => u === "*" || u.toLowerCase() === login)) return true;
+    if (access.users.some((u) => u === "*" || u.toLowerCase() === login)) return true;
     const orgs = new Set(user.orgs.map((o) => o.toLowerCase()));
-    return bot.access.orgs.some((o) => orgs.has(o.toLowerCase()));
+    return access.orgs.some((o) => orgs.has(o.toLowerCase()));
 }

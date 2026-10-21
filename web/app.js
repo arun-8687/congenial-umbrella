@@ -69,9 +69,16 @@ function connectEvents() {
         "approval.created", "approval.decided", "task.updated", "routine.run", "notification", "bots.changed",
     ];
     for (const t of types) source.addEventListener(t, (e) => handleEvent(JSON.parse(e.data)));
+    let lost = false;
     source.onerror = () => {
-        // EventSource reconnects by itself; refresh state once it is back.
-        source.addEventListener("open", () => void Promise.all([refreshThreads(), refreshInbox()]).catch(() => {}), { once: true });
+        lost = true; // EventSource reconnects by itself
+    };
+    source.onopen = () => {
+        if (!lost) return;
+        lost = false;
+        // Events sent while we were disconnected are gone: refresh lists and let open views catch up.
+        void Promise.all([refreshBots(), refreshThreads(), refreshInbox()]).catch(() => {});
+        emit({ type: "reconnected" });
     };
 }
 
@@ -178,7 +185,7 @@ export function renderSidebar() {
         );
 
     const dmByBot = new Map(S.threads.filter((t) => t.kind === "dm").map((t) => [t.botIds[0], t]));
-    const roster = S.bots.map((b) => {
+    const rosterItem = (b) => {
         const t = b.dmThreadId ? S.threads.find((x) => x.id === b.dmThreadId) : dmByBot.get(b.id);
         const active = r.name === "thread" && t && r.params[0] === t.id;
         return h(
@@ -188,7 +195,16 @@ export function renderSidebar() {
             h("span.who", h("span.name", b.name), h("span.title", statusOf(b.id) === "working" ? "Working…" : statusOf(b.id) === "waiting" ? "Waiting for you" : b.title ?? b.description)),
             t?.unread && !active ? h("span.badge", String(t.unread)) : null,
         );
-    });
+    };
+    // Bots grouped into the user's own sidebar sections; hidden bots stay reachable from Home and search.
+    const sections = new Map([["", []]]);
+    for (const b of S.bots.filter((x) => !x.hidden)) {
+        const key = b.section ?? "";
+        if (!sections.has(key)) sections.set(key, []);
+        sections.get(key).push(b);
+    }
+    const named = [...sections.keys()].filter(Boolean).sort((a, b) => a.localeCompare(b));
+    const hiddenCount = S.bots.filter((x) => x.hidden).length;
     const groups = S.threads.filter((t) => t.kind === "group").map((t) => {
         const active = r.name === "thread" && r.params[0] === t.id;
         return h(
@@ -218,7 +234,9 @@ export function renderSidebar() {
         h(
             "div.sidebar-scroll",
             h("div.section-head", h("span.grow", "Bots"), iconButton("plus", "New bot", () => openNewBot())),
-            h("div.roster", roster.length ? roster : h("div.empty-hint", "No bots yet.")),
+            h("div.roster", sections.get("").length ? sections.get("").map(rosterItem) : named.length ? null : h("div.empty-hint", "No bots yet.")),
+            named.map((name) => [h("div.section-head", h("span.grow", name)), h("div.roster", sections.get(name).map(rosterItem))]),
+            hiddenCount ? h("button.empty-hint", { type: "button", style: { border: 0, background: "none", cursor: "pointer" }, onClick: () => navigate("#/") }, `${hiddenCount} hidden bot${hiddenCount === 1 ? "" : "s"} · show on Home`) : null,
             h("div.section-head", h("span.grow", "Group chats"), iconButton("plus", "New group chat", () => openNewGroup())),
             h("div.roster", groups.length ? groups : h("div.empty-hint", "Put 2–6 bots in one thread.")),
         ),

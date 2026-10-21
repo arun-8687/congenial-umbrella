@@ -57,7 +57,18 @@ export class WebAuth {
         const stored = this.o.repo.user(s.login);
         if (!stored) return null;
         const token = this.o.sealer.open(s.tokenCiphertext);
-        return { user: { login: stored.login, id: stored.githubId, orgs: stored.orgs, githubToken: token }, viaCookie: true };
+        if (this.o.devLogin && token.startsWith("dev-token-")) {
+            return { user: { login: stored.login, id: stored.githubId, orgs: stored.orgs, githubToken: token }, viaCookie: true };
+        }
+        // Re-check the token (cached by the authenticator) so revoked tokens and org removals take
+        // effect within minutes rather than when the cookie expires.
+        const fresh = await this.o.authenticator.authenticate(token);
+        if (!fresh) {
+            this.o.repo.deleteWebSession(sha256(sid));
+            return null;
+        }
+        this.o.onSignIn(fresh);
+        return { user: fresh, viaCookie: true };
     }
 
     /** Signs in with a GitHub token pasted by the user (PAT or OAuth token). */

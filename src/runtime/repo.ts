@@ -375,6 +375,13 @@ export class Repo {
             .all<Row>("SELECT * FROM messages WHERE thread_id = ? AND seq > ? ORDER BY seq LIMIT ?", threadId, opts.afterSeq ?? 0, opts.limit ?? 10_000)
             .map(toMessage);
     }
+    /** The newest `limit` messages before `beforeSeq` (or the end), oldest first. */
+    latestMessages(threadId: string, limit: number, beforeSeq?: number): Message[] {
+        return this.db
+            .all<Row>("SELECT * FROM messages WHERE thread_id = ? AND seq < ? ORDER BY seq DESC LIMIT ?", threadId, beforeSeq ?? Number.MAX_SAFE_INTEGER, limit)
+            .map(toMessage)
+            .reverse();
+    }
     message(id: string): Message | undefined {
         const r = this.db.get<Row>("SELECT * FROM messages WHERE id = ?", id);
         return r && toMessage(r);
@@ -417,6 +424,9 @@ export class Repo {
                 threadId, botId,
             ),
         );
+    }
+    countQueued(owner: string): number {
+        return Number(this.db.get<Row>("SELECT COUNT(*) AS n FROM jobs WHERE owner = ? AND status = 'queued'", owner)?.n ?? 0);
     }
     setJobStatus(id: string, status: Job["status"], error?: string): void {
         this.db.run("UPDATE jobs SET status = ?, error = ?, updated_at = ? WHERE id = ?", status, error ?? null, now(), id);
@@ -655,6 +665,37 @@ export class Repo {
     }
     deleteWebSession(idHash: string): void {
         this.db.run("DELETE FROM web_sessions WHERE id_hash = ?", idHash);
+    }
+
+    // ---- sidebar preferences
+    botPrefs(owner: string): Map<string, { section: string | null; hidden: boolean }> {
+        return new Map(
+            this.db.all<Row>("SELECT * FROM bot_prefs WHERE owner = ?", owner).map((r) => [str(r.bot_id), { section: nstr(r.section), hidden: r.hidden === 1 }]),
+        );
+    }
+    setBotPrefs(owner: string, botId: string, prefs: { section: string | null; hidden: boolean }): void {
+        this.db.run(
+            `INSERT INTO bot_prefs (owner, bot_id, section, hidden) VALUES (?, ?, ?, ?)
+             ON CONFLICT(owner, bot_id) DO UPDATE SET section = excluded.section, hidden = excluded.hidden`,
+            owner, botId, prefs.section, prefs.hidden ? 1 : 0,
+        );
+    }
+
+    /** Everything stored for one person, for "delete my data". Audit records are kept. */
+    deleteUserData(owner: string): { uploads: string[]; sessions: string[] } {
+        return this.db.tx(() => {
+            const uploads = this.db.all<Row>("SELECT id FROM uploads WHERE owner = ?", owner).map((r) => str(r.id));
+            const sessions = this.db
+                .all<Row>("SELECT b.session_id FROM bot_sessions b JOIN threads t ON t.id = b.thread_id WHERE t.owner = ?", owner)
+                .map((r) => str(r.session_id));
+            for (const table of ["threads", "tasks", "routines", "approvals", "memories", "notifications", "jobs", "uploads", "share_links", "personal_bots"]) {
+                this.db.run(`DELETE FROM ${table} WHERE owner = ?`, owner);
+            }
+            for (const table of ["credentials", "user_skills", "bot_prefs"]) this.db.run(`DELETE FROM ${table} WHERE owner = ?`, owner);
+            this.db.run("DELETE FROM web_sessions WHERE login = ?", owner);
+            this.db.run("DELETE FROM users WHERE login = ?", owner);
+            return { uploads, sessions };
+        });
     }
 
     countBotsAndGroups(owner: string): number {

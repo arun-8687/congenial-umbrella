@@ -96,12 +96,40 @@ export async function renderThread(root, threadId) {
 
     // ---------------------------------------------------------------- messages
     let lastDay = "";
-    function renderMessages(messages) {
+    function renderMessages(messages, keepScroll = false) {
+        const fromBottom = scroller.scrollHeight - scroller.scrollTop;
         clear(list);
         lastDay = "";
+        if (data.hasEarlier) list.append(h("div.day-sep", h("button.btn.sm.ghost", { type: "button", onClick: loadEarlier }, "Load earlier messages")));
         if (!messages.length) list.append(welcome());
         for (const m of messages) appendMessage(m, false);
-        scrollToBottom(true);
+        for (const s of streams.values()) list.append(s.el);
+        if (keepScroll) scroller.scrollTop = scroller.scrollHeight - fromBottom;
+        else scrollToBottom(true);
+    }
+
+    async function loadEarlier() {
+        const first = data.messages[0];
+        if (!first) return;
+        const page = await get(`/api/threads/${thread.id}?before=${first.seq}&limit=200`);
+        data.messages = [...page.messages, ...data.messages];
+        data.hasEarlier = page.hasEarlier;
+        renderMessages(data.messages, true);
+    }
+
+    /** After a dropped connection: fetch what was missed and refresh approval states. */
+    async function catchUp() {
+        const lastSeq = data.messages.at(-1)?.seq ?? 0;
+        const fresh = await get(`/api/threads/${thread.id}?after=${lastSeq}`).catch(() => null);
+        if (!fresh) return;
+        for (const a of fresh.approvals) approvals.set(a.id, a);
+        for (const s of streams.values()) s.el.remove();
+        streams.clear();
+        data.task = fresh.task ?? data.task;
+        data.messages.push(...fresh.messages.filter((m) => !data.messages.some((x) => x.id === m.id)));
+        renderMessages(data.messages);
+        renderWorking();
+        renderBanner();
     }
 
     function welcome() {
@@ -111,10 +139,10 @@ export async function renderThread(root, threadId) {
         starters.push("What can you help me with?");
         if (b.builtinTools?.includes("web_search")) starters.push("Research the latest GitHub Copilot features and summarize them");
         if (b.canMessage?.length) starters.push("Delegate a quick competitive analysis to the right teammate");
-        if (b.computer) starters.push("Run a script that lists the files on your computer");
+        if (b.computer && S.me.computerAccess === "shell") starters.push("Run a script that lists the files on your computer");
         if (b.memory) starters.push("Remember that I prefer short bullet-point answers");
         starters.push("Set up a routine every weekday at 9am to send me a standup summary");
-        if (thread.kind === "group") starters.splice(0, starters.length, `@${thread.botIds[0]} kick things off with a plan`, "Everyone: introduce yourselves and what you'd handle");
+        if (thread.kind === "group") starters.splice(0, starters.length, `@${thread.botIds[0]} kick things off with a plan`, `${members().map((x) => "@" + x.id).join(" ")} introduce yourselves and what you'd handle`);
         return h(
             "div.welcome",
             thread.kind === "group" ? h("div.stack", members().map((x) => avatar(x, "lg"))) : avatar(b, "lg"),
@@ -370,6 +398,9 @@ export async function renderThread(root, threadId) {
                 break;
             case "bots.changed":
                 clear(headerSlot, header());
+                break;
+            case "reconnected":
+                void catchUp();
                 break;
         }
     });

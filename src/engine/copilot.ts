@@ -31,8 +31,9 @@ const DEFAULT_TIMEOUT_MS = 10 * 60_000;
 /** The SDK requires more than one hour of remaining lifetime; user tokens are re-presented on every turn. */
 const TOKEN_LIFETIME_S = 8 * 60 * 60;
 
-/** Built-in tools behind `computer: true`: file tools and the shell, all scoped by the permission policy. */
-const COMPUTER_TOOLS = ["view", "create", "edit", "glob", "grep", "bash", "read_bash", "write_bash", "stop_bash", "list_bash"];
+/** Built-in tools behind `computer: true`, all scoped by the platform's permission decisions. */
+const FILE_TOOLS = ["view", "create", "edit", "glob", "grep"];
+const SHELL_TOOLS = ["bash", "read_bash", "write_bash", "stop_bash", "list_bash"];
 
 /**
  * Runs bot turns on the GitHub Copilot runtime.
@@ -135,7 +136,7 @@ export class CopilotEngine implements AgentEngine {
 
     /** Maps a bot spec onto Copilot session configuration. Exposed for tests. */
     sessionConfig(
-        req: Pick<TurnRequest, "bot" | "user" | "skills" | "connectors" | "computerDir" | "tools" | "systemExtra" | "decidePermission" | "onEvent">,
+        req: Pick<TurnRequest, "bot" | "user" | "skills" | "connectors" | "computerDir" | "computerShell" | "tools" | "systemExtra" | "decidePermission" | "onEvent">,
     ): ResumeSessionConfig {
         const { bot, user } = req;
         const env = this.options.env ?? process.env;
@@ -145,7 +146,7 @@ export class CopilotEngine implements AgentEngine {
         if (bot.builtinTools.length > 0) available.addBuiltIn(bot.builtinTools);
         if (req.skills.length > 0) available.addBuiltIn("skill");
         if (req.connectors.length > 0) available.addMcp("*");
-        if (computer) available.addBuiltIn(COMPUTER_TOOLS);
+        if (computer) available.addBuiltIn(req.computerShell ? [...FILE_TOOLS, ...SHELL_TOOLS] : FILE_TOOLS);
 
         const placeholders: PlaceholderContext = { user, env, computerDir: req.computerDir };
 
@@ -231,8 +232,18 @@ function skillProvider(skills: SkillSpec[]): SkillProvider {
 
 function permissionHandler(req: Pick<TurnRequest, "decidePermission" | "onEvent">): PermissionHandler {
     return async (request) => {
-        const detail = describeRequest(request as unknown as Record<string, unknown>);
-        const verdict = await req.decidePermission({ kind: request.kind, detail });
+        const r = request as unknown as Record<string, unknown>;
+        const str = (k: string) => (typeof r[k] === "string" ? (r[k] as string) : undefined);
+        const detail = describeRequest(r);
+        const verdict = await req.decidePermission({
+            kind: request.kind,
+            detail,
+            path: str("resolvedPath") ?? str("path") ?? str("fileName"),
+            url: str("url"),
+            server: str("serverName"),
+            tool: str("toolName"),
+            readOnly: typeof r.readOnly === "boolean" ? r.readOnly : undefined,
+        });
         req.onEvent?.({ type: "permission", kind: request.kind, decision: verdict.decision, detail });
         return verdict.decision === "approve" ? { kind: "approve-once" } : { kind: "reject", feedback: verdict.feedback };
     };

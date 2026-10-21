@@ -59,10 +59,11 @@ and the [Oct 2026 grok.com notes](https://releases.sh/xai/grok.md).
 | Routines: one workflow for one bot, scheduled, 50 per bot, 20 runs kept | ✅ Same limits; cron + time zone, run now, run history, bots can create routines from chat |
 | Bots return to you when a human decision is needed; approval settings | ✅ Per-bot allow / ask / deny policy. Inline approval cards and Inbox with Approve / Deny / Always allow; the bot pauses until you decide (timeout → expired) |
 | Connectors, with reconnect for expired sign-ins | ✅ MCP connectors; per-user credentials encrypted at rest; Connect / Reconnect / Disconnect |
-| Shared cloud computer (files, terminal, browser) across your bots | ✅ Per-user workspace shared by your bots: file tools, shell (approval-gated), a Playwright browser connector with a persistent profile, and a file browser with upload/download |
+| Shared cloud computer (files, terminal, browser) across your bots | ✅ Per-user workspace shared by your bots: file tools confined to it, shell (approval-gated, opt-in per deployment), a Playwright browser connector with a persistent profile, and a file browser with upload/download. Off by default; see [Security model](#security-model) |
+| Bot organization: sidebar sections | ✅ Per-user sections and hide/show for any bot, so a large org catalog stays manageable |
 | Audit view of bot actions ("coming" at Grok) | ✅ Append-only audit log with trace IDs, plus an admin viewer |
 | 50 bots + group chats per account | ✅ Same, configurable |
-| Chat niceties | ✅ Streaming Markdown, tool-activity chips, reasoning view, image and file attachments (paste / drag-drop), voice dictation, read-aloud, ⌘K search, share links, Markdown export, desktop notifications, dark / light, mobile layout |
+| Chat niceties | ✅ Streaming Markdown, tool-activity chips, reasoning view, image and file attachments (paste / drag-drop), voice dictation, read-aloud, ⌘K search, share links, Markdown export, desktop notifications, paged history, catch-up after reconnects, dark / light, mobile layout |
 
 Beyond Grok Bot, because this is for enterprises:
 
@@ -76,7 +77,8 @@ Beyond Grok Bot, because this is for enterprises:
 - **Guardrails on bot-to-bot traffic.** An allowlist (`canMessage`), a hop limit, cycle refusal (also
   for `@mention` ping-pong in groups), and a per-request call budget.
 - **Prompt-injection hygiene.** Tool output and other bots' messages are marked as data, and bot
-  messages carry `source: "agent-<id>"`.
+  messages carry `source: "agent-<id>"`. The usual exfiltration channels are closed (see below).
+- **Data rights.** "Delete my data" removes everything stored for a person except the audit trail.
 
 Grok Bot features not reproduced: recording a screen demo to create a skill (here you teach from a
 thread instead), live remote control of the agent computer for typing passwords, and model-based "Auto
@@ -98,7 +100,8 @@ builtinTools: [web_search, web_fetch]
 skills: [release-notes]
 connectors: [github]
 canMessage: [researcher]           # or ["*"] for any bot the user can use
-computer: false                    # shared workspace with file tools + shell
+computer: false                    # shared workspace (needs COMPUTER_ACCESS on the server)
+allowedDomains: [docs.github.com]  # optional: where web_fetch may go
 memory: true
 access: { users: ["*"], orgs: [your-org] }
 permissions:                       # optional; derived from capabilities when omitted
@@ -117,7 +120,16 @@ headers: { Authorization: "Bearer ${user.credential}" }
 auth: { type: secret, label: "Jira API token" }
 ```
 
-Placeholders: `${user.githubToken}`, `${user.login}`, `${user.credential}`, `${user.computerDir}` and
+Connector policy fields:
+
+```yaml
+access: { users: [], orgs: [platform-team] }  # who may add it to personal bots
+requireApproval: writes        # writes (default) | always | never
+allowTools: ["search_*", "get_*"]  # never ask for these
+```
+
+Connectors that embed an org secret (`${env:...}`) are unavailable to personal bots unless `access`
+grants them. Placeholders: `${user.githubToken}`, `${user.login}`, `${user.credential}`, `${user.computerDir}` and
 `${env:NAME}`. They are resolved per session and redacted from the audit log. Skills are standard
 `SKILL.md` folders. `npm run validate` checks the whole workspace.
 
@@ -146,20 +158,47 @@ jobs that post into a routine thread.
 | `GITHUB_OAUTH_CLIENT_ID`, `GITHUB_OAUTH_CLIENT_SECRET`, `GITHUB_OAUTH_SCOPE` | | OAuth sign-in |
 | `GITHUB_API_URL`, `GITHUB_WEB_URL` | github.com | GitHub Enterprise Server |
 | `SECRET_KEY` | generated in `STATE_DIR` | base64 32 bytes; seals tokens and credentials |
-| `MAX_HOPS`, `MAX_BOT_CALLS`, `CONCURRENCY` | `3`, `12`, `4` | |
+| `MAX_HOPS`, `MAX_BOT_CALLS`, `CONCURRENCY`, `MAX_PER_USER` | `3`, `12`, `4`, `2` | `MAX_PER_USER` keeps one person from starving others |
+| `COMPUTER_ACCESS` | `off` | `files` (file tools confined to each user's workspace) or `shell` |
+| `ALLOW_PRIVATE_NETWORK` | off | let bots fetch private/internal addresses |
 | `TURN_TIMEOUT_MS`, `APPROVAL_TIMEOUT_MS` | 10 min, 30 min | |
 | `DEV_LOGIN` | off | demo only; refused with `ENGINE=copilot` |
+
+## Security model
+
+The Copilot runtime's tools run on the platform host. The platform therefore treats every bot as
+untrusted (bots read untrusted content and can be prompt-injected), and narrows what they can do:
+
+| Threat | Control |
+| --- | --- |
+| A bot reads host files (other users' data, `secret.key`, the DB) | No computer unless `COMPUTER_ACCESS` allows it. Every read/write path, after resolving symlinks, must be inside that user's workspace or it is refused. Missing paths are refused. |
+| A bot runs arbitrary commands | Shell only with `COMPUTER_ACCESS=shell`, and each command asks the user unless they chose "always allow" for their own bot. Enable it only where each user's runtime is isolated. |
+| SSRF to cloud metadata or internal services | `web_fetch` URLs are resolved and refused if any address is loopback, private, link-local, CGNAT or multicast (opt out with `ALLOW_PRIVATE_NETWORK`). Per-bot `allowedDomains` narrows further. DNS rebinding remains possible, so also restrict egress at the network layer. |
+| Exfiltration through rendered output | Remote images in bot Markdown are never loaded (rewritten during sanitizing, and blocked by `img-src 'self'`). The E2E run asserts the browser makes no off-origin requests at all. |
+| Connector write actions | Non-read-only MCP tools ask the user by default (`requireApproval`). |
+| Shared org credentials | Connectors with `${env:...}` secrets are org-bot-only unless granted. |
+| Stale access | Cookie sessions re-check the token with GitHub (5-minute cache), and background work re-checks token and org membership before running as someone. |
+| Bot-to-bot loops and runaway cost | Allowlists, cycle refusal, hop limit, per-request budget, per-user concurrency and queue caps. |
+| Secrets at rest / in logs | Tokens and credentials are sealed with AES-256-GCM; known secrets are redacted from the audit log. |
 
 ## Tests
 
 ```bash
-npm test          # 48 unit + HTTP tests (fake engine, in-memory SQLite)
+npm test          # 74 unit + HTTP tests (fake engine, in-memory SQLite)
 npm run e2e       # drives Chromium through every screen in demo mode → ./screenshots
 npm run typecheck # against the SDK's shipped .d.ts
 ```
 
+The E2E run fails on any console error, horizontal overflow at phone width, or off-origin request.
+
 ## Known limits
 
+- **Not verified against a live model.** These parts are covered by types, mocks and `npm run smoke`,
+  but haven't been seen working end to end against a real Copilot session:
+  - the Copilot engine path itself;
+  - the runtime asking permission for every URL and file it touches;
+  - MCP servers' read-only hints, which drive connector approvals.
+  Run the smoke test with a licensed token before relying on them.
 - **Sandboxing:** the Computer's shell and stdio connectors run inside the server's container. Use one
   container per trust boundary, or connect to a sandboxed Copilot runtime with
   `RuntimeConnection.forUri`.

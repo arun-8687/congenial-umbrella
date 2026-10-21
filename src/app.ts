@@ -45,11 +45,17 @@ export async function buildApp(config: Config, overrides: AppOverrides = {}): Pr
             : new CopilotEngine({ baseDirectory: config.copilotHome, defaultModel: config.defaultModel, orgName: config.orgName, logLevel: config.copilotLogLevel }));
     await engine.start();
 
+    const authenticator = overrides.authenticator ?? new GitHubAuthenticator(config.githubApiUrl);
     const runtime = new Runtime(repo, new Directory(catalog, repo), engine, new Hub(), audit, sealer, {
         ...DEFAULT_RUNTIME_OPTIONS,
         maxHops: config.maxHops,
         maxBotCalls: config.maxBotCalls,
         concurrency: config.concurrency,
+        maxPerUser: config.maxPerUser,
+        computerAccess: config.computerAccess,
+        allowPrivateNetwork: config.allowPrivateNetwork,
+        // Background work re-checks the user's token and org membership before running as them.
+        verifyUser: (u) => (config.devLogin && u.githubToken.startsWith("dev-token-") ? Promise.resolve(u) : authenticator.authenticate(u.githubToken)),
         turnTimeoutMs: config.turnTimeoutMs,
         approvalTimeoutMs: config.approvalTimeoutMs,
         computersDir: config.computersDir,
@@ -58,7 +64,7 @@ export async function buildApp(config: Config, overrides: AppOverrides = {}): Pr
     runtime.start();
 
     const auth = new WebAuth({
-        authenticator: overrides.authenticator ?? new GitHubAuthenticator(config.githubApiUrl),
+        authenticator,
         repo,
         sealer,
         oauth: config.oauth,

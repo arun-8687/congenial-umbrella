@@ -1,13 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import type { Auditor } from "../audit.js";
 import type { BotSpec } from "../catalog/schema.js";
 import type { Sealer } from "../crypto.js";
-import { denialFeedback, policyFor } from "../engine/policy.js";
+import { blockedUrlReason } from "../engine/net.js";
+import { decide, denialFeedback, policyFor, type ComputerAccess } from "../engine/policy.js";
 import type { AgentEngine, Attachment, GrantedConnector, PermissionAsk, PermissionVerdict, PlatformTool } from "../engine/types.js";
-import type { User } from "../identity.js";
+import { canUseConnector, type User } from "../identity.js";
 import { Directory, DirectoryError, type BotEntry } from "./directory.js";
 import type { BotStatus, Hub } from "./events.js";
 import type { Message, MessageMeta, Repo, Thread, ToolActivity } from "./repo.js";
@@ -32,9 +33,22 @@ export interface RuntimeOptions {
     maxRoutinesPerBot: number;
     runsKept: number;
     maxGroupSize: number;
+    /** Who gets a shared computer; see {@link ComputerAccess}. */
+    computerAccess: ComputerAccess;
+    /** Turns one user may have running at once, so nobody starves everyone else. */
+    maxPerUser: number;
+    /** Wakes one user may have waiting in the queue before new messages are refused. */
+    maxQueuedPerUser: number;
+    /**
+     * Re-checks a stored user before background work (routines, hand-offs) runs as them: returns the
+     * user with current org membership, or null when their token no longer works.
+     */
+    verifyUser?: (user: User) => Promise<User | null>;
+    /** Let bots fetch private, loopback and link-local addresses (intranet docs). Off by default: SSRF. */
+    allowPrivateNetwork?: boolean;
 }
 
-export const DEFAULT_RUNTIME_OPTIONS: Omit<RuntimeOptions, "computersDir" | "uploadsDir"> = {
+export const DEFAULT_RUNTIME_OPTIONS: Omit<RuntimeOptions, "computersDir" | "uploadsDir" | "verifyUser"> = {
     maxHops: 3,
     maxBotCalls: 12,
     concurrency: 4,
@@ -44,7 +58,13 @@ export const DEFAULT_RUNTIME_OPTIONS: Omit<RuntimeOptions, "computersDir" | "upl
     maxRoutinesPerBot: 50,
     runsKept: 20,
     maxGroupSize: 6,
+    computerAccess: "off",
+    maxPerUser: 2,
+    maxQueuedPerUser: 25,
 };
+
+const MAX_IMAGES_PER_TURN = 5;
+const MAX_IMAGE_BYTES = 8_000_000;
 
 export class NotFoundError extends Error {}
 export class InvalidError extends Error {}
@@ -75,11 +95,16 @@ export interface TurnContext {
  */
 export class Runtime {
     readonly directory: Directory;
-    private readonly running = new Map<string, AbortController>();
+    /** Running turns by `threadId:botId`. */
+    private readonly running = new Map<string, { controller: AbortController; owner: string }>();
+    /** Running turns currently blocked on a human approval; they don't count against concurrency. */
+    private readonly waiting = new Set<string>();
     private readonly inflight = new Set<Promise<unknown>>();
     private readonly pendingApprovals = new Map<string, (approved: boolean) => void>();
     private readonly budgets = new Map<string, { remaining: number; expires: number }>();
-    private readonly statuses = new Map<string, { status: BotStatus; threadId: string | null }>();
+    /** Active turns per `owner\0botId`, so one bot working in two threads reports correctly. */
+    private readonly activity = new Map<string, { working: Map<string, number>; waiting: Map<string, number> }>();
+    private lastPrune = 0;
     private readonly crons = new Map<string, Cron>();
     private pumpTimer: NodeJS.Timeout | undefined;
     private stopped = true;
@@ -117,7 +142,7 @@ export class Runtime {
         for (const c of this.crons.values()) c.stop();
         this.crons.clear();
         for (const resolve of this.pendingApprovals.values()) resolve(false);
-        for (const c of this.running.values()) c.abort();
+        for (const r of this.running.values()) r.controller.abort();
         await Promise.race([Promise.allSettled([...this.inflight]), new Promise((r) => setTimeout(r, 10_000))]);
     }
 
@@ -136,6 +161,11 @@ export class Runtime {
 
     /** Remembers the user (and a sealed copy of their token) so routines and hand-offs can run as them later. */
     rememberUser(user: User): void {
+        const prev = this.repo.user(user.login);
+        if (prev && prev.githubId === user.id && JSON.stringify(prev.orgs) === JSON.stringify(user.orgs) && this.sealer.open(prev.tokenCiphertext) === user.githubToken) {
+            this.audit.trackSecret(user.githubToken);
+            return; // nothing changed; skip the write on every request
+        }
         this.repo.upsertUser({
             login: user.login,
             githubId: user.id,
@@ -212,7 +242,7 @@ export class Runtime {
 
     async deleteThread(user: User, id: string): Promise<void> {
         this.thread(user, id);
-        this.running.get(id)?.abort();
+        this.abortThread(id);
         for (const s of this.repo.sessionIdsForThread(id)) await this.engine.deleteSession(s).catch(() => {});
         this.repo.deleteThread(id);
         this.hub.publish(user.login, { type: "thread.deleted", threadId: id });
@@ -223,13 +253,17 @@ export class Runtime {
         this.repo.markRead(id, seq);
     }
 
-    /** Stops whatever bots are doing in the thread right now. */
+    /** Stops whatever bots are doing in the thread right now, including turns waiting on approval. */
     stopThread(user: User, threadId: string): boolean {
         this.thread(user, threadId);
+        return this.abortThread(threadId);
+    }
+
+    private abortThread(threadId: string): boolean {
         let stopped = false;
-        for (const [key, c] of this.running) {
+        for (const [key, r] of this.running) {
             if (key.startsWith(`${threadId}:`)) {
-                c.abort();
+                r.controller.abort();
                 stopped = true;
             }
         }
@@ -245,6 +279,9 @@ export class Runtime {
     postUserMessage(user: User, threadId: string, text: string, attachmentIds: string[] = []): Message {
         const thread = this.thread(user, threadId);
         if (thread.archived) throw new InvalidError("thread is archived");
+        if (this.repo.countQueued(user.login) >= this.options.maxQueuedPerUser) {
+            throw new InvalidError("your bots have too much queued work; wait for some of it to finish");
+        }
         const attachments = attachmentIds.map((id) => {
             const u = this.repo.upload(user.login, id);
             if (!u) throw new InvalidError(`upload ${id} not found`);
@@ -280,14 +317,23 @@ export class Runtime {
 
     // ------------------------------------------------------------------ job pump
 
+    private active(owner?: string): number {
+        let n = 0;
+        for (const [key, r] of this.running) if (!this.waiting.has(key) && (owner === undefined || r.owner === owner)) n++;
+        return n;
+    }
+
     private pump(): void {
         if (this.stopped) return;
         const now = Date.now();
         for (const [k, b] of this.budgets) if (b.expires < now) this.budgets.delete(k);
-        const free = this.options.concurrency - this.running.size;
-        if (free <= 0) return;
-        for (const job of this.repo.queuedJobs(50)) {
-            if (this.running.size >= this.options.concurrency) break;
+        if (now - this.lastPrune > 3600_000) {
+            this.lastPrune = now;
+            this.repo.pruneJobs(new Date(now - 7 * 86400_000).toISOString());
+        }
+        if (this.active() >= this.options.concurrency) return;
+        for (const job of this.repo.queuedJobs(200)) {
+            if (this.active() >= this.options.concurrency) break;
             if (job.kind !== "wake") {
                 this.repo.setJobStatus(job.id, "failed", `unknown job kind ${job.kind}`);
                 continue;
@@ -295,8 +341,9 @@ export class Runtime {
             const p = job.payload as WakePayload;
             const key = `${p.threadId}:${p.botId}`;
             if (this.running.has(key)) continue; // one turn per bot per thread at a time
+            if (this.active(job.owner) >= this.options.maxPerUser) continue; // fairness between users
             const controller = new AbortController();
-            this.running.set(key, controller);
+            this.running.set(key, { controller, owner: job.owner });
             this.repo.setJobStatus(job.id, "running");
             const work = this.runWake(job.owner, p, controller.signal)
                 .then(
@@ -308,6 +355,7 @@ export class Runtime {
                 )
                 .finally(() => {
                     this.running.delete(key);
+                    this.waiting.delete(key);
                     this.inflight.delete(work);
                     queueMicrotask(() => this.pump());
                 });
@@ -320,13 +368,20 @@ export class Runtime {
         if (!thread || thread.archived) return;
         const failEarly = (msg: string) => {
             this.systemMessage(thread, msg, { error: msg });
-            if (p.routineRunId) this.repo.finishRun(p.routineRunId, "failed", null, msg);
+            const runIds = [p.routineRunId, ...this.repo.messages(thread.id).slice(-20).map((m) => m.meta.routineRunId)];
+            for (const id of new Set(runIds)) if (id && this.repo.run_(id)?.status === "running") this.repo.finishRun(id, "failed", null, msg);
             const task = thread.kind === "task" ? this.repo.taskByThread(thread.id) : undefined;
             if (task) this.repo.setTaskStatus(task.id, "failed", msg);
             this.notify(owner, "error", msg, "", thread.id);
         };
-        const user = this.userFor(owner);
-        if (!user) return failEarly(`No stored sign-in for @${owner}; sign in again so bots can work for you.`);
+        const stored = this.userFor(owner);
+        if (!stored) return failEarly(`No stored sign-in for @${owner}; sign in again so bots can work for you.`);
+        let user: User = stored;
+        if (this.options.verifyUser) {
+            const verified = await this.options.verifyUser(stored).catch(() => null);
+            if (!verified) return failEarly(`GitHub no longer accepts @${owner}'s sign-in; sign in again so bots can work for you.`);
+            user = verified;
+        }
         const entry = this.directory.bot(user, p.botId);
         if (!entry) return failEarly(`@${p.botId} is no longer available.`);
         const bot = entry.bot;
@@ -335,12 +390,16 @@ export class Runtime {
         if (fresh.length === 0) return;
         // Only what this turn actually read; messages arriving mid-turn wake the bot again.
         const readUpTo = fresh.at(-1)!.seq;
+        // Routine runs belong to the messages that started them, so coalesced wakes still finish every run.
+        const runIds = [...new Set([p.routineRunId, ...fresh.map((m) => m.meta.routineRunId)].filter((x): x is string => Boolean(x)))];
+        const key = `${thread.id}:${bot.id}`;
+        const computer = this.computerFor(owner, bot);
 
         const streamId = randomUUID();
         const tools: ToolActivity[] = [];
         let reasoning = "";
         const meta = { traceId: p.traceId, actor: owner };
-        this.setStatus(owner, bot.id, thread.id, "working");
+        this.track(owner, bot.id, thread.id, "working", +1);
         this.audit.log({ type: "bot.turn", botId: bot.id, threadId: thread.id, chain: p.chain }, meta);
 
         try {
@@ -348,16 +407,17 @@ export class Runtime {
             const result = await this.engine.turn({
                 sessionId: cursor.sessionId,
                 resume: cursor.turns > 0,
-                bot,
+                bot: computer.bot,
                 user,
                 skills: this.directory.skillsFor(owner, bot),
-                connectors: this.grantedConnectors(owner, bot),
-                computerDir: this.computerDir(owner),
+                connectors: this.grantedConnectors(user, bot),
+                computerDir: computer.dir,
+                computerShell: computer.shell,
                 tools: botTools(this, ctx),
                 prompt: await this.promptWithFiles(owner, thread, bot, fresh, user),
                 attachments: await this.imageAttachments(fresh),
-                systemExtra: this.systemExtra(user, bot, thread),
-                decidePermission: (ask) => this.decidePermission(user, bot, thread, ask, p.traceId),
+                systemExtra: this.systemExtra(user, computer.bot, thread),
+                decidePermission: (ask) => this.decidePermission(user, computer.bot, thread, ask, p.traceId, { key, signal }),
                 signal,
                 timeoutMs: this.options.turnTimeoutMs,
                 onEvent: (e) => {
@@ -390,28 +450,30 @@ export class Runtime {
                     }
                 },
             });
+            if (!this.repo.thread(thread.id)) return; // deleted while the bot was working
             const text = result.text.trim() || (result.aborted ? "_Stopped._" : "_(no reply)_");
             const replyMeta: MessageMeta = { traceId: p.traceId, ...(tools.length ? { tools } : {}), ...(reasoning ? { reasoning } : {}), ...(result.aborted ? { aborted: true } : {}) };
-            if (p.routineRunId) replyMeta.routineRunId = p.routineRunId;
+            if (runIds.length) replyMeta.routineRunId = runIds[0];
             const reply = this.repo.addMessage(thread.id, "bot", bot.id, text, replyMeta);
             this.repo.advanceBotSession(thread.id, bot.id, readUpTo);
             this.publishMessage(owner, reply, streamId);
             this.audit.log({ type: "message.bot", botId: bot.id, threadId: thread.id, text }, meta);
-            this.afterReply(user, thread, bot, reply, p);
+            this.afterReply(user, thread, bot, reply, p, runIds);
         } catch (err) {
             const msg = (err as Error).message;
+            if (!this.repo.thread(thread.id)) return;
             this.repo.advanceBotSession(thread.id, bot.id, readUpTo);
             const m = this.systemMessage(thread, `${bot.name} ran into a problem: ${msg}`, { error: msg, traceId: p.traceId });
             this.hub.publish(owner, { type: "message.created", message: m, streamId });
             this.audit.log({ type: "error", where: `turn ${bot.id} in ${thread.id}`, message: msg }, meta);
-            this.onTurnFailed(user, thread, bot, msg, p);
+            this.onTurnFailed(user, thread, bot, msg, runIds);
         } finally {
-            this.setStatus(owner, bot.id, null, "idle");
+            this.track(owner, bot.id, thread.id, "working", -1);
         }
     }
 
     /** Follow-ups once a bot has replied: hand-offs by @mention, task completion, routine bookkeeping. */
-    private afterReply(user: User, thread: Thread, bot: BotSpec, reply: Message, p: WakePayload): void {
+    private afterReply(user: User, thread: Thread, bot: BotSpec, reply: Message, p: WakePayload, runIds: string[]): void {
         if (thread.kind === "group") {
             const chain = [...p.chain, bot.id];
             for (const target of this.mentionedMembers(user, thread, reply.text)) {
@@ -438,9 +500,9 @@ export class Runtime {
                 this.deliverTaskResult(user, done, reply.text, p);
             }
         }
-        if (p.routineRunId) {
-            this.repo.finishRun(p.routineRunId, "done", reply.text, null);
-            const run = this.repo.run_(p.routineRunId);
+        for (const runId of runIds) {
+            this.repo.finishRun(runId, "done", reply.text, null);
+            const run = this.repo.run_(runId);
             if (run) {
                 this.hub.publish(user.login, { type: "routine.run", routineId: run.routineId, runId: run.id, status: "done" });
                 const r = this.repo.routine(run.routineId);
@@ -452,7 +514,7 @@ export class Runtime {
         }
     }
 
-    private onTurnFailed(user: User, thread: Thread, bot: BotSpec, msg: string, p: WakePayload): void {
+    private onTurnFailed(user: User, thread: Thread, bot: BotSpec, msg: string, runIds: string[]): void {
         if (thread.kind === "task") {
             const task = this.repo.taskByThread(thread.id);
             if (task) {
@@ -461,9 +523,9 @@ export class Runtime {
                 this.notify(user.login, "task", `${bot.name} could not finish “${task.title}”`, msg, thread.id);
             }
         }
-        if (p.routineRunId) {
-            this.repo.finishRun(p.routineRunId, "failed", null, msg);
-            const run = this.repo.run_(p.routineRunId);
+        for (const runId of runIds) {
+            this.repo.finishRun(runId, "failed", null, msg);
+            const run = this.repo.run_(runId);
             if (run) this.hub.publish(user.login, { type: "routine.run", routineId: run.routineId, runId: run.id, status: "failed" });
             this.notify(user.login, "routine", `${bot.name}'s routine failed`, msg, thread.id);
         }
@@ -509,17 +571,37 @@ export class Runtime {
     cancelTask(user: User, id: string): void {
         const t = this.repo.task(id);
         if (!t || t.owner !== user.login) throw new NotFoundError(`task ${id} not found`);
-        this.running.get(`${t.threadId}:${t.assignee}`)?.abort();
+        if (!["open", "in_progress", "waiting"].includes(t.status)) throw new InvalidError(`task is already ${t.status}`);
+        this.running.get(`${t.threadId}:${t.assignee}`)?.controller.abort();
         this.repo.setTaskStatus(id, "cancelled");
         this.hub.publish(user.login, { type: "task.updated", task: this.repo.task(id)! });
     }
 
     // ------------------------------------------------------------------ approvals
 
-    private async decidePermission(user: User, bot: BotSpec, thread: Thread, ask: PermissionAsk, traceId: string): Promise<PermissionVerdict> {
-        const policy = policyFor(bot, ask.kind);
-        if (policy === "allow") return { decision: "approve" };
-        if (policy === "deny") return { decision: "reject", feedback: denialFeedback(bot, ask.kind) };
+    private async decidePermission(
+        user: User,
+        bot: BotSpec,
+        thread: Thread,
+        ask: PermissionAsk,
+        traceId: string,
+        turn: { key?: string; signal?: AbortSignal } = {},
+    ): Promise<PermissionVerdict> {
+        const verdict = decide(bot, ask, {
+            computerAccess: this.options.computerAccess,
+            computerDir: bot.computer ? this.computerDir(user.login) : undefined,
+            connector: (id) => (bot.connectors.includes(id) ? this.directory.catalog.connectors.get(id) : undefined),
+        });
+        if (verdict.decision === "deny") return { decision: "reject", feedback: denialFeedback(verdict.reason) };
+        if (ask.kind === "url" && !this.options.allowPrivateNetwork) {
+            const blocked = await blockedUrlReason(ask.url);
+            if (blocked) {
+                this.audit.log({ type: "permission.blocked", botId: bot.id, kind: "url", url: ask.url, reason: blocked }, { actor: user.login, traceId });
+                return { decision: "reject", feedback: denialFeedback(blocked) };
+            }
+        }
+        if (verdict.decision === "allow") return { decision: "approve" };
+        if (turn.signal?.aborted) return { decision: "reject", feedback: "The turn was stopped." };
 
         const approval = this.repo.createApproval({ owner: user.login, botId: bot.id, threadId: thread.id, kind: ask.kind, detail: ask.detail ?? null });
         const m = this.systemMessage(thread, `${bot.name} is asking to **${approvalVerb(ask.kind)}**${ask.detail ? `:\n\n\`\`\`\n${ask.detail}\n\`\`\`` : "."}`, { approvalId: approval.id, traceId });
@@ -527,23 +609,29 @@ export class Runtime {
         this.hub.publish(user.login, { type: "approval.created", approval });
         this.notify(user.login, "approval", `${bot.name} needs your approval`, `${approvalVerb(ask.kind)}${ask.detail ? `: ${ask.detail}` : ""}`, thread.id);
         this.audit.log({ type: "approval.requested", approvalId: approval.id, botId: bot.id, kind: ask.kind, detail: ask.detail }, { actor: user.login, traceId });
-        this.setStatus(user.login, bot.id, thread.id, "waiting");
+        this.track(user.login, bot.id, thread.id, "waiting", +1);
+        // A turn blocked on a person must not hold a worker slot others could use.
+        if (turn.key) this.waiting.add(turn.key);
 
         const approved = await new Promise<boolean>((resolve) => {
-            const timer = setTimeout(() => {
+            const expire = () => {
                 if (this.repo.decideApproval(approval.id, "expired")) {
                     this.hub.publish(user.login, { type: "approval.decided", approval: this.repo.approval(approval.id)! });
                 }
-                this.pendingApprovals.delete(approval.id);
-                resolve(false);
-            }, this.options.approvalTimeoutMs);
-            this.pendingApprovals.set(approval.id, (ok) => {
+                finish(false);
+            };
+            const timer = setTimeout(expire, this.options.approvalTimeoutMs);
+            const finish = (ok: boolean) => {
                 clearTimeout(timer);
+                turn.signal?.removeEventListener("abort", expire);
                 this.pendingApprovals.delete(approval.id);
                 resolve(ok);
-            });
+            };
+            turn.signal?.addEventListener("abort", expire, { once: true });
+            this.pendingApprovals.set(approval.id, finish);
         });
-        this.setStatus(user.login, bot.id, thread.id, "working");
+        if (turn.key) this.waiting.delete(turn.key);
+        this.track(user.login, bot.id, thread.id, "waiting", -1);
         return approved
             ? { decision: "approve" }
             : { decision: "reject", feedback: `@${user.login} did not approve this ${ask.kind} request. Do not retry it; explain what you would have done instead.` };
@@ -656,27 +744,29 @@ export class Runtime {
      */
     async askOnce(user: User, bot: BotSpec, thread: Thread, prompt: string, opts: { traceId: string; chain: string[]; source?: `agent-${string}` }): Promise<string> {
         const ctx: TurnContext = { user, bot, thread, traceId: opts.traceId, chain: opts.chain };
-        this.setStatus(user.login, bot.id, thread.id, "working");
+        const computer = this.computerFor(user.login, bot);
+        this.track(user.login, bot.id, thread.id, "working", +1);
         try {
             const result = await this.engine.turn({
                 sessionId: `ask-${randomUUID()}`,
                 resume: false,
                 ephemeral: true,
-                bot,
+                bot: computer.bot,
                 user,
                 skills: this.directory.skillsFor(user.login, bot),
-                connectors: this.grantedConnectors(user.login, bot),
-                computerDir: this.computerDir(user.login),
+                connectors: this.grantedConnectors(user, bot),
+                computerDir: computer.dir,
+                computerShell: computer.shell,
                 tools: botTools(this, ctx),
                 prompt,
-                systemExtra: this.systemExtra(user, bot, { ...thread, kind: "dm" }),
+                systemExtra: this.systemExtra(user, computer.bot, { ...thread, kind: "dm" }),
                 ...(opts.source ? { source: opts.source } : {}),
-                decidePermission: (ask) => this.decidePermission(user, bot, thread, ask, opts.traceId),
+                decidePermission: (ask) => this.decidePermission(user, computer.bot, thread, ask, opts.traceId),
                 timeoutMs: this.options.turnTimeoutMs,
             });
             return result.text;
         } finally {
-            this.setStatus(user.login, bot.id, null, "idle");
+            this.track(user.login, bot.id, thread.id, "working", -1);
         }
     }
 
@@ -729,13 +819,71 @@ export class Runtime {
 
     status(owner: string): Record<string, { status: BotStatus; threadId: string | null }> {
         const out: Record<string, { status: BotStatus; threadId: string | null }> = {};
-        for (const [k, v] of this.statuses) if (k.startsWith(`${owner}\u0000`)) out[k.slice(owner.length + 1)] = v;
+        for (const k of this.activity.keys()) {
+            if (!k.startsWith(`${owner}\u0000`)) continue;
+            const botId = k.slice(owner.length + 1);
+            out[botId] = this.statusOf(owner, botId);
+        }
         return out;
     }
 
-    private setStatus(owner: string, botId: string, threadId: string | null, status: BotStatus): void {
-        this.statuses.set(`${owner}\u0000${botId}`, { status, threadId });
-        this.hub.publish(owner, { type: "bot.status", botId, threadId, status });
+    private statusOf(owner: string, botId: string): { status: BotStatus; threadId: string | null } {
+        const a = this.activity.get(`${owner}\u0000${botId}`);
+        const first = (m?: Map<string, number>) => (m && m.size ? [...m.keys()][0]! : null);
+        if (a?.waiting.size) return { status: "waiting", threadId: first(a.waiting) };
+        if (a?.working.size) return { status: "working", threadId: first(a.working) };
+        return { status: "idle", threadId: null };
+    }
+
+    /** Counts a bot's activity per thread; the published status is derived from all of it. */
+    private track(owner: string, botId: string, threadId: string, kind: "working" | "waiting", delta: 1 | -1): void {
+        const k = `${owner}\u0000${botId}`;
+        let a = this.activity.get(k);
+        if (!a) this.activity.set(k, (a = { working: new Map(), waiting: new Map() }));
+        const m = a[kind];
+        const n = (m.get(threadId) ?? 0) + delta;
+        if (n > 0) m.set(threadId, n);
+        else m.delete(threadId);
+        if (!a.working.size && !a.waiting.size) this.activity.delete(k);
+        const s = this.statusOf(owner, botId);
+        this.hub.publish(owner, { type: "bot.status", botId, threadId: s.threadId, status: s.status });
+    }
+
+    /** The bot as the engine should see it, with the computer narrowed to the deployment setting. */
+    computerFor(owner: string, bot: BotSpec): { bot: BotSpec; dir: string; shell: boolean } {
+        const enabled = bot.computer && this.options.computerAccess !== "off";
+        return {
+            bot: enabled ? bot : { ...bot, computer: false },
+            dir: this.computerDir(owner),
+            shell: enabled && this.options.computerAccess === "shell",
+        };
+    }
+
+    /**
+     * Deletes everything stored for the user: threads, bots, memory, routines, credentials, uploads,
+     * their computer and their sealed token. The audit log is kept, as compliance requires.
+     */
+    async deleteUserData(user: User): Promise<void> {
+        for (const t of this.repo.threads(user.login, { includeArchived: true })) this.abortThread(t.id);
+        for (const r of this.repo.routines(user.login)) {
+            this.crons.get(r.id)?.stop();
+            this.crons.delete(r.id);
+        }
+        for (const a of this.repo.approvals(user.login, "pending")) this.pendingApprovals.get(a.id)?.(false);
+        const { uploads, sessions } = this.repo.deleteUserData(user.login);
+        for (const id of uploads) await rm(this.uploadPath(id), { force: true });
+        for (const s of sessions) await this.engine.deleteSession(s).catch(() => {});
+        await rm(this.computerDir(user.login), { recursive: true, force: true });
+        this.audit.log({ type: "user.data_deleted" }, { actor: user.login });
+    }
+
+    /** Removes a personal bot and the routines that would otherwise keep running it. */
+    deletePersonalBot(user: User, botId: string): boolean {
+        if (!this.repo.deletePersonalBot(user.login, botId)) return false;
+        for (const r of this.repo.routines(user.login).filter((x) => x.botId === botId)) this.deleteRoutine(user, r.id);
+        this.audit.log({ type: "bot.deleted", botId }, { actor: user.login });
+        this.hub.publish(user.login, { type: "bots.changed" });
+        return true;
     }
 
     notify(owner: string, kind: string, title: string, body = "", threadId: string | null = null): void {
@@ -764,11 +912,15 @@ export class Runtime {
         });
     }
 
-    grantedConnectors(owner: string, bot: BotSpec): GrantedConnector[] {
+    grantedConnectors(user: User, bot: BotSpec): GrantedConnector[] {
+        const owner = user.login;
+        const personal = this.directory.bot(user, bot.id)?.scope === "personal";
         const out: GrantedConnector[] = [];
         for (const id of bot.connectors) {
             const spec = this.directory.catalog.connectors.get(id);
             if (!spec) continue;
+            // Org bots were reviewed by admins; personal bots only get connectors the user may use.
+            if (personal && !canUseConnector(user, spec)) continue;
             if (!spec.auth) {
                 out.push({ spec });
                 continue;
@@ -808,7 +960,15 @@ export class Runtime {
             });
             parts.push(`This is the group chat "${thread.title}" with ${members.join(", ")} and @${user.login}. Mention a teammate with @id to hand them the next step; only mention someone when you need them.`);
         }
-        if (bot.computer) parts.push("You have a workspace computer shared with this user's other bots. Keep files there organized; writes and shell commands may need the user's approval.");
+        if (bot.computer) {
+            parts.push(
+                `You have a workspace computer shared with this user's other bots, at ${this.computerDir(user.login)}. ` +
+                    "Keep files inside it; anything outside is refused. Writes" +
+                    (this.options.computerAccess === "shell" ? " and shell commands" : "") +
+                    " may need the user's approval." +
+                    (this.options.computerAccess === "shell" ? "" : " Shell commands are not available on this platform."),
+            );
+        }
         return parts.join("\n\n");
     }
 
@@ -837,7 +997,7 @@ export class Runtime {
         const out: Attachment[] = [];
         for (const m of fresh) {
             for (const a of m.meta.attachments ?? []) {
-                if (!a.mimeType.startsWith("image/")) continue;
+                if (!a.mimeType.startsWith("image/") || a.size > MAX_IMAGE_BYTES || out.length >= MAX_IMAGES_PER_TURN) continue;
                 const data = await readFile(this.uploadPath(a.id)).catch(() => undefined);
                 if (data) out.push({ type: "blob", data: data.toString("base64"), mimeType: a.mimeType, displayName: a.name });
             }
