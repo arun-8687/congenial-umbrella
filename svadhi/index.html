@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#F6F5F1" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0F0F0E" media="(prefers-color-scheme: dark)">
+<title>Svadhī · Seed round investor deck</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.51.0/dist/tabler-icons.min.css">
+<style>
+  :root{
+    --saffron:#FF9933; --green:#138808; --blue:#378ADD; --blue-text:#2368B5;
+    --page:#F6F5F1; --card:#FFFFFF; --ink:#1C1C1A; --muted:#5F5F5A; --faint:#767671; --hair:#E5E3DD;
+    --sf-tint:#FFF2E3; --sf-text:#A24F00;
+    --gr-tint:#EAF5E7; --gr-text:#0E6608; --gr-line:#138808;
+    --ne-tint:#F2F1EE; --dot-off:#D5D3CD; --bar-gray:#A3A29C;
+    --serif:"Iowan Old Style","Palatino Linotype",Palatino,"Book Antiqua","Noto Serif",Georgia,ui-serif,serif;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue","Noto Sans",Arial,sans-serif;
+    --deva:"Noto Sans Devanagari","Kohinoor Devanagari","Devanagari Sangam MN","Mangal",var(--sans);
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --blue-text:#86B9F0;
+      --page:#0F0F0E; --card:#191918; --ink:#ECEBE7; --muted:#ABAAA4; --faint:#8F8E88; --hair:#2E2D2A;
+      --sf-tint:#33230F; --sf-text:#FFB467;
+      --gr-tint:#13280F; --gr-text:#7DD06F; --gr-line:#2FA022;
+      --ne-tint:#242421; --dot-off:#3B3A36; --bar-gray:#6E6D68;
+    }
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--page);color:var(--ink)}
+  body{font-family:var(--sans);font-size:15px;line-height:1.5;font-weight:400;
+       -webkit-font-smoothing:antialiased;-webkit-text-size-adjust:100%;
+       padding:max(16px,env(safe-area-inset-top)) 16px max(20px,env(safe-area-inset-bottom))}
+  b,strong,h1,h2,h3{font-weight:500}
+  .deck{max-width:380px;margin:0 auto}
+
+  /* viewport + track */
+  .viewport{overflow:hidden;border-radius:16px;touch-action:pan-y}
+  .viewport.dragging{user-select:none;-webkit-user-select:none;cursor:grabbing}
+  .track{display:flex;gap:12px;transition:transform .38s cubic-bezier(.2,.7,.2,1);will-change:transform}
+  .slide{flex:0 0 100%;min-width:0;display:flex}
+  @media (prefers-reduced-motion: reduce){.track,.fill,.dot span{transition:none!important}}
+
+  /* card with tricolor bands */
+  .card{position:relative;flex:1;min-height:520px;background:var(--card);border:1px solid var(--hair);
+        border-radius:16px;overflow:hidden;display:flex;flex-direction:column}
+  .card::before,.card::after{content:"";position:absolute;left:0;right:0;height:7px}
+  .card::before{top:0;background:var(--saffron)}
+  .card::after{bottom:0;background:var(--green)}
+  .body{flex:1;display:flex;flex-direction:column;gap:14px;padding:29px 20px 25px}
+
+  /* type */
+  .head{display:flex;flex-direction:column;gap:6px}
+  .eyebrow{font-size:13px;font-weight:500;color:var(--sf-text);letter-spacing:.01em;margin:0}
+  .title{font-family:var(--serif);font-size:26px;font-weight:400;line-height:1.2;margin:0;letter-spacing:-.005em}
+  .lead{font-size:16px;margin:0;color:var(--ink)}
+  .sub{font-size:13px;color:var(--muted);margin:0}
+  .foot{margin-top:auto;font-size:12px;color:var(--faint);line-height:1.45}
+  .c-green{color:var(--gr-text)} .c-saffron{color:var(--sf-text)}
+  i.ti{font-size:20px;color:var(--blue);line-height:1}
+
+  /* centered slides */
+  .body.center{text-align:center;align-items:center}
+  .stack{margin:auto 0;display:flex;flex-direction:column;align-items:center;gap:14px}
+  .chakra{width:84px;height:84px;display:block}
+  .brand{font-family:var(--serif);font-size:48px;line-height:1;margin:0;font-weight:400;letter-spacing:-.01em}
+  .deva{font-family:var(--deva);font-size:15px;color:var(--sf-text);margin:-4px 0 0}
+  .close-title{font-family:var(--serif);font-size:30px;line-height:1.2;font-weight:400;margin:0}
+  .brand-sm{font-family:var(--serif);font-size:22px;margin:4px 0 0;font-weight:400}
+
+  /* rows */
+  .rows{display:flex;flex-direction:column}
+  .row{display:flex;gap:12px;align-items:flex-start;padding:14px 0;border-top:1px solid var(--hair)}
+  .row:first-child{border-top:0;padding-top:2px}
+  .ic{flex:0 0 36px;width:36px;height:36px;border-radius:10px;background:var(--ne-tint);display:grid;place-items:center}
+  .row h3{font-size:16px;margin:0 0 2px;line-height:1.35}
+  .row p{font-size:13px;color:var(--muted);margin:0;line-height:1.45}
+  .tag{font-weight:400;color:var(--muted)}
+
+  /* tiles */
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .tile{border-radius:12px;padding:14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+  .sf{background:var(--sf-tint)} .gr{background:var(--gr-tint)} .ne{background:var(--ne-tint)}
+  .num{font-family:var(--serif);font-size:28px;line-height:1.1;font-weight:400;font-variant-numeric:lining-nums}
+  .sf .num{color:var(--sf-text)} .gr .num{color:var(--gr-text)}
+  .lbl{font-size:13px;color:var(--ink);line-height:1.4;margin:0}
+  .tile h3{font-size:15px;margin:0;line-height:1.3}
+  .tile p{font-size:13px;color:var(--muted);margin:0;line-height:1.45}
+  .metrics .tile{min-height:122px;justify-content:space-between}
+  .feat .tile{min-height:150px;gap:8px}
+  .feat .tile i.ti{margin-bottom:2px}
+
+  .quote{margin:auto 0 0;background:var(--sf-tint);border-radius:12px;padding:16px 18px;
+         font-family:var(--serif);font-size:19px;line-height:1.35;color:var(--ink)}
+
+  /* market */
+  .mkt{display:flex;flex-direction:column;align-items:center;gap:10px}
+  .mkt .tile{width:100%;gap:4px}
+  .mkt .w2{width:86%} .mkt .w3{width:72%}
+  .mkt .num{font-size:30px}
+  .mkt-top{display:flex;align-items:center;justify-content:space-between;gap:8px}
+  .chip{font-size:12px;font-weight:500;padding:3px 9px;border-radius:999px;background:var(--card);color:var(--ink);border:1px solid var(--hair)}
+  .ne .num{color:var(--ink)}
+
+  /* quadrant */
+  .quad .tile{min-height:124px}
+  .quad .hl{background:var(--gr-tint);border:2px solid var(--gr-line);padding:12px}
+  .quad .hl h3{color:var(--gr-text)}
+  .axis{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:13px;color:var(--muted);margin:0}
+  .axis span{display:inline-flex;align-items:center;gap:4px;white-space:nowrap}
+  .axis i.ti{font-size:15px}
+  .wedge h3{color:var(--sf-text)}
+  .wedge p{color:var(--ink);font-size:14px}
+
+  /* gtm */
+  .n{flex:0 0 32px;width:32px;height:32px;border-radius:50%;background:var(--sf-tint);color:var(--sf-text);
+     display:grid;place-items:center;font-size:14px;font-weight:500}
+
+  /* team */
+  .badge{flex:0 0 40px;width:40px;height:40px;border-radius:50%;display:grid;place-items:center;font-size:12px;font-weight:500}
+  .b-ceo{background:var(--sf-tint);color:var(--sf-text)}
+  .b-cto{background:var(--ne-tint);color:var(--blue-text)}
+  .b-data{background:var(--gr-tint);color:var(--gr-text)}
+  .b-adv{background:var(--ne-tint);color:var(--muted)}
+
+  /* ask bars */
+  .bars{display:flex;flex-direction:column;gap:14px}
+  .bar{display:flex;flex-direction:column;gap:6px}
+  .bar-top{display:flex;justify-content:space-between;align-items:baseline;font-size:15px}
+  .bar-top span:last-child{font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums}
+  .trk{height:10px;border-radius:5px;background:var(--ne-tint);overflow:hidden}
+  .fill{height:100%;width:0;border-radius:5px;transition:width .8s cubic-bezier(.2,.7,.2,1) .15s}
+  .slide.active .fill{width:var(--w)}
+  .f-sf{background:var(--saffron)} .f-bl{background:var(--blue)} .f-gr{background:var(--green)} .f-gy{background:var(--bar-gray)}
+  .miles{margin-top:auto;gap:10px}
+  .miles h3{color:var(--gr-text)}
+  .miles ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
+  .miles li{display:flex;align-items:center;gap:10px;font-size:15px}
+
+  /* navigation */
+  .nav{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:16px}
+  .arrow{flex:0 0 44px;width:44px;height:44px;border-radius:50%;border:1px solid var(--hair);background:var(--card);
+         color:var(--ink);display:grid;place-items:center;cursor:pointer;padding:0;-webkit-tap-highlight-color:transparent}
+  .arrow i.ti{color:var(--ink)}
+  .arrow:disabled{opacity:.35;cursor:default}
+  .dots{display:flex;justify-content:center;flex:1;min-width:0}
+  .dot{flex:1 1 17px;max-width:18px;min-width:12px;height:28px;border:0;background:none;padding:0;cursor:pointer;
+       display:grid;place-items:center;-webkit-tap-highlight-color:transparent}
+  .dot span{width:7px;height:7px;border-radius:50%;background:var(--dot-off);transition:background .2s,transform .2s}
+  .dot.viewed span{background:var(--green)}
+  .dot.current span{background:var(--saffron);transform:scale(1.3)}
+  .count{text-align:center;font-size:13px;color:var(--muted);margin:8px 0 0}
+  :focus-visible{outline:2px solid var(--blue);outline-offset:2px;border-radius:8px}
+  .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+</style>
+</head>
+<body>
+<main class="deck" aria-roledescription="carousel" aria-label="Svadhī investor pitch deck">
+  <div class="viewport" id="viewport">
+    <div class="track" id="track">
+
+      <!-- 1 · Cover -->
+      <section class="slide" aria-roledescription="slide" aria-label="1 of 13: Cover">
+        <div class="card"><div class="body center">
+          <div class="stack">
+            <p class="eyebrow">Seed round · ₹40 crore · Bengaluru</p>
+            <svg class="chakra" role="img" aria-label="Ashoka chakra"></svg>
+            <h1 class="brand">Svadhī</h1>
+            <p class="deva"><span lang="sa">स्वधी</span> · one's own intellect</p>
+            <h2 class="title">India's <span class="c-green">own</span> intelligence.</h2>
+            <p class="lead" style="color:var(--muted);max-width:300px">A sovereign, Indic-first large language model, built in India for 1.4 billion people.</p>
+          </div>
+          <p class="foot" style="margin-top:0">founders@svadhi.ai · svadhi.ai</p>
+        </div></div>
+      </section>
+
+      <!-- 2 · Problem -->
+      <section class="slide" aria-roledescription="slide" aria-label="2 of 13: The problem">
+        <div class="card"><div class="body">
+          <div class="head"><p class="eyebrow">The problem</p><h2 class="title">India runs its AI on rented minds</h2></div>
+          <div class="rows">
+            <div class="row"><div class="ic"><i class="ti ti-world-upload" aria-hidden="true"></i></div>
+              <div><h3>Data leaves the country</h3><p>Prompts from banks, hospitals and ministries are processed on foreign servers.</p></div></div>
+            <div class="row"><div class="ic"><i class="ti ti-language" aria-hidden="true"></i></div>
+              <div><h3>Built English-first</h3><p>Indic scripts get split into more tokens, so the same sentence costs more and reads worse.</p></div></div>
+            <div class="row"><div class="ic"><i class="ti ti-world-dollar" aria-hidden="true"></i></div>
+              <div><h3>Priced and governed abroad</h3><p>Access, pricing and usage rules can change overnight, outside Indian control.</p></div></div>
+          </div>
+          <blockquote class="quote">A nation of 1.4 billion can't outsource its intelligence layer.</blockquote>
+        </div></div>
+      </section>
+
+      <!-- 3 · Why now -->
+      <section class="slide" aria-roledescription="slide" aria-label="3 of 13: Why now">
+        <div class="card"><div class="body">
+          <div class="head"><p class="eyebrow">Why now</p><h2 class="title">The window is open</h2></div>
+          <div class="grid2 metrics">
+            <div class="tile sf"><div class="num">958M</div><p class="lbl">Active internet users in 2025</p></div>
+            <div class="tile gr"><div class="num">57%</div><p class="lbl">Urban users prefer regional-language content</p></div>
+            <div class="tile gr"><div class="num">38,000+</div><p class="lbl">IndiaAI GPUs at about ₹65/hr</p></div>
+            <div class="tile sf"><div class="num">₹250 cr</div><p class="lbl">Max DPDP penalty per breach; core rules live May 2027</p></div>
+          </div>
+          <p class="foot">Sources: IAMAI–Kantar 2025, IndiaAI Mission, DPDP Rules 2025</p>
+        </div></div>
+      </section>
+
+      <!-- 4 · Solution -->
+      <section class="slide" aria-roledescription="slide" aria-label="4 of 13: The solution">
+        <div class="card"><div class="body">
+          <div class="head"><p class="eyebrow">The solution</p><h2 class="title">Svadhī: fluent in Bharat</h2></div>
+          <div class="grid2 feat">
+            <div class="tile sf"><i class="ti ti-alphabet-devanagari" aria-hidden="true"></i><h3>Indic-first</h3><p>22 scheduled languages plus Hinglish and code-mix</p></div>
+            <div class="tile gr"><i class="ti ti-microphone" aria-hidden="true"></i><h3>Voice-native</h3><p>Speech in, speech out for the next 500M users</p></div>
+            <div class="tile gr"><i class="ti ti-shield-lock" aria-hidden="true"></i><h3>Sovereign</h3><p>India cloud or on-prem; data never leaves</p></div>
+            <div class="tile sf"><i class="ti ti-currency-rupee" aria-hidden="true"></i><h3>Priced in ₹</h3><p>Indic tokenizer cuts cost per answer by ~40%</p></div>
+          </div>
+        </div></div>
+      </section>
+
+      <!-- 5 · Product -->
+      <section class="slide" aria-roledescription="slide" aria-label="5 of 13: Product">
+        <div class="card"><div class="body">
+          <div class="head"><p class="eyebrow">Product</p><h2 class="title">One model family, every surface</h2></div>
+          <div class="rows">
+            <div class="row"><div class="ic"><i class="ti ti-stack-2" aria-hidden="true"></i></div>
+              <div><h3>Svadhī Base <span class="tag">· 13B</span></h3><p>Pretrained on 2T tokens, 40% Indic; 70B in training</p></div></div>
+            <div class="row"><div class="ic"><i class="ti ti-message-chatbot" aria-hidden="true"></i></div>
+              <div><h3>Svadhī Chat</h3><p>Instruction-tuned assistant with enterprise guardrails</p></div></div>
+            <div class="row"><div class="ic"><i class="ti ti-waveform" aria-hidden="true"></i></div>
+              <div><h3>Svadhī Vāk</h3><p>Speech-to-speech across 12 Indian languages</p></div></div>
+            <div class="row"><div class="ic"><i class="ti ti-device-mobile" aria-hidden="true"></i></div>
+              <div><h3>Svadhī Laghu <span class="tag">· 2B</span></h3><p>Runs offline on ₹10,000 Android phones</p></div></div>
+          </div>
+          <p class="foot">Delivered via API, fine-tuning studio and air-gapped on-prem appliance</p>
+        </div></div>
+      </section>
+
+      <!-- 6 · Market -->
+      <section class="slide" aria-roledescription="slide" aria-label="6 of 13: Market">
+        <div class="card"><div class="body">
+          <div class="head"><p class="eyebrow">Market</p><h2 class="title">A market compounding fast</h2></div>
+          <div class="mkt">
+            <div class="tile sf"><div class="mkt-top"><div class="num">₹1.4 lakh cr</div><span class="chip">TAM</span></div>
+              <p class="lbl">India AI market by 2027 (~$17B, BCG–NASSCOM)</p></div>
+            <div class="tile ne w2"><div class="mkt-top"><div class="num">₹25,000 cr</div><span class="chip">SAM</span></div>
+              <p class="lbl">Indic and compliance-sensitive LLM workloads</p></div>
+            <div class="tile gr w3"><div class="mkt-top"><div class="num">₹750 cr</div><span class="chip">SOM</span></div>
+              <p class="lbl">3% of SAM by 2031</p></div>
+          </div>
+        </div></div>
+      </section>
+
+      <!-- 7 · Business model -->
+      <section class="slide" aria-roledescription="slide" aria-label="7 of 13: Business model">
+        <div class="card"><div class="body">
+          <div class="head"><p class="eyebrow">Business model</p><h2 class="title">Four ways we earn</h2></div>
+          <div class="grid2 feat">
+            <div class="tile sf"><i class="ti ti-api" aria-hidden="true"></i><h3>API</h3><p>From ₹40 per million tokens</p></div>
+            <div class="tile gr"><i class="ti ti-building-skyscraper" aria-hidden="true"></i><h3>Enterprise</h3><p>₹1–3 cr/yr on-prem licences</p></div>
+            <div class="tile gr"><i class="ti ti-building-bank" aria-hidden="true"></i><h3>Government</h3><p>Citizen services, PSUs, states</p></div>
+            <div class="tile sf"><i class="ti ti-plant-2" aria-hidden="true"></i><h3>Copilots</h3><p>Agri, health and legal apps</p></div>
+          </div>
+          <p class="foot">Target blended gross margin: 65% at scale</p>
+        </div></div>
+      </section>
+
+      <!-- 8 · Competition -->
+      <section class="slide" aria-roledescription="slide" aria-label="8 of 13: Competition">
+        <div class="card"><div class="body">
+          <div class="head"><p class="eyebrow">Competition</p><h2 class="title">Where we win</h2></div>
+          <p class="axis"><span><i class="ti ti-arrow-up" aria-hidden="true"></i>Up: Indic depth</span><span><i class="ti ti-arrow-right" aria-hidden="true"></i>Right: sovereign deployment</span></p>
+          <div class="grid2 quad">
+            <div class="tile ne"><h3>Global frontier APIs</h3><p>Capable, but data and pricing offshore</p></div>
+            <div class="tile hl"><h3>Svadhī and Indian peers</h3><p>Sarvam, BharatGen, Soket and others</p></div>
+            <div class="tile ne"><h3>Wrapper chatbots</h3><p>Thin layer on foreign models</p></div>
+            <div class="tile ne"><h3>Self-hosted open models</h3><p>Deployable, but English-first</p></div>
+          </div>
+          <div class="tile sf wedge"><h3>Our wedge</h3><p>Voice-first models shipped as an air-gapped appliance with audit logs built for regulated BFSI</p></div>
+        </div></div>
+      </section>
+
+      <!-- 9 · Traction -->
+      <section class="slide" aria-roledescription="slide" aria-label="9 of 13: Traction">
+        <div class="card"><div class="body">
+          <div class="head"><p class="eyebrow">Traction</p><h2 class="title">Early proof</h2></div>
+          <div class="grid2 metrics">
+            <div class="tile sf"><div class="num">6</div><p class="lbl">Paid pilots: 2 banks, 2 insurers, 1 telco, 1 state</p></div>
+            <div class="tile gr"><div class="num">₹9 cr</div><p class="lbl">ARR in 4 signed LOIs</p></div>
+            <div class="tile gr"><div class="num">+18%</div><p class="lbl">Over leading open model on Indic evals, 12 languages</p></div>
+            <div class="tile sf"><div class="num">3,200</div><p class="lbl">Developers on the API waitlist</p></div>
+          </div>
+        </div></div>
+      </section>
+
+      <!-- 10 · Go-to-market -->
+      <section class="slide" aria-roledescription="slide" aria-label="10 of 13: Go-to-market">
+        <div class="card"><div class="body">
+          <div class="head"><p class="eyebrow">Go-to-market</p><h2 class="title">Land where compliance bites</h2></div>
+          <div class="rows">
+            <div class="row"><div class="n">1</div>
+              <div><h3>0–12 months</h3><p>BFSI and government services, where data-residency pull is strongest</p></div></div>
+            <div class="row"><div class="n">2</div>
+              <div><h3>12–24 months</h3><p>Telecom, agriculture and healthcare at scale</p></div></div>
+            <div class="row"><div class="n">3</div>
+              <div><h3>24+ months</h3><p>Consumer voice assistant for Bharat</p></div></div>
+          </div>
+          <p class="foot">Leverages IndiaAI subsidised compute and the Foundation Models pillar</p>
+        </div></div>
+      </section>
+
+      <!-- 11 · Team -->
+      <section class="slide" aria-roledescription="slide" aria-label="11 of 13: Team">
+        <div class="card"><div class="body">
+          <div class="head"><p class="eyebrow">Team</p><h2 class="title">Built by people who've done it</h2></div>
+          <div class="rows">
+            <div class="row"><div class="badge b-ceo" aria-hidden="true">CEO</div>
+              <div><h3>Co-founder, CEO</h3><p>12 years in NLP; ex-research scientist at a global AI lab; IIT Bombay</p></div></div>
+            <div class="row"><div class="badge b-cto" aria-hidden="true">CTO</div>
+              <div><h3>Co-founder, CTO</h3><p>Led LLM pretraining at scale; 8 papers at ACL and EMNLP; IISc</p></div></div>
+            <div class="row"><div class="badge b-data" aria-hidden="true">Data</div>
+              <div><h3>Head of language data</h3><p>Computational linguist; built corpora in 14 Indian languages</p></div></div>
+            <div class="row"><div class="badge b-adv" aria-hidden="true">Adv</div>
+              <div><h3>Advisors</h3><p>Former IAS officer in digital governance; ex-CTO of a top-5 Indian bank</p></div></div>
+          </div>
+          <p class="foot">22-person team · 14 researchers · 9 languages spoken in-house</p>
+        </div></div>
+      </section>
+
+      <!-- 12 · The ask -->
+      <section class="slide" aria-roledescription="slide" aria-label="12 of 13: The ask">
+        <div class="card"><div class="body">
+          <div class="head"><p class="eyebrow">The ask</p><h2 class="title">Raising ₹40 cr seed</h2></div>
+          <div class="bars" role="list" aria-label="Use of funds">
+            <div class="bar" role="listitem"><div class="bar-top"><span>Compute</span><span>40% · ₹16 cr</span></div><div class="trk"><div class="fill f-sf" style="--w:40%"></div></div></div>
+            <div class="bar" role="listitem"><div class="bar-top"><span>Talent</span><span>25% · ₹10 cr</span></div><div class="trk"><div class="fill f-bl" style="--w:25%"></div></div></div>
+            <div class="bar" role="listitem"><div class="bar-top"><span>Data and evals</span><span>20% · ₹8 cr</span></div><div class="trk"><div class="fill f-gr" style="--w:20%"></div></div></div>
+            <div class="bar" role="listitem"><div class="bar-top"><span>Go-to-market</span><span>15% · ₹6 cr</span></div><div class="trk"><div class="fill f-gy" style="--w:15%"></div></div></div>
+          </div>
+          <div class="tile gr miles">
+            <h3>18-month milestones</h3>
+            <ul>
+              <li><i class="ti ti-circle-check" aria-hidden="true"></i>70B model live</li>
+              <li><i class="ti ti-circle-check" aria-hidden="true"></i>25 paying enterprises</li>
+              <li><i class="ti ti-circle-check" aria-hidden="true"></i>₹30 cr ARR</li>
+            </ul>
+          </div>
+        </div></div>
+      </section>
+
+      <!-- 13 · Close -->
+      <section class="slide" aria-roledescription="slide" aria-label="13 of 13: Close">
+        <div class="card"><div class="body center">
+          <div class="stack">
+            <svg class="chakra" role="img" aria-label="Ashoka chakra"></svg>
+            <h2 class="close-title">India shouldn't <span class="c-saffron">rent</span> its intelligence.</h2>
+            <p class="lead c-green">Let's build it together.</p>
+            <p class="brand-sm">Svadhī</p>
+            <p class="sub">founders@svadhi.ai · svadhi.ai</p>
+          </div>
+        </div></div>
+      </section>
+
+    </div>
+  </div>
+
+  <nav class="nav" aria-label="Slide navigation">
+    <button class="arrow" id="prev" type="button" aria-label="Previous slide"><i class="ti ti-chevron-left" aria-hidden="true"></i></button>
+    <div class="dots" id="dots"></div>
+    <button class="arrow" id="next" type="button" aria-label="Next slide"><i class="ti ti-chevron-right" aria-hidden="true"></i></button>
+  </nav>
+  <p class="count" id="count" aria-live="polite"></p>
+</main>
+
+<script>
+(function(){
+  // Ashoka chakra: outer ring, small filled hub, 24 spokes
+  var NS='http://www.w3.org/2000/svg', C=42;
+  document.querySelectorAll('svg.chakra').forEach(function(svg){
+    svg.setAttribute('viewBox','0 0 84 84');
+    function el(tag,attrs){var e=document.createElementNS(NS,tag);for(var k in attrs)e.setAttribute(k,attrs[k]);svg.appendChild(e);return e;}
+    el('circle',{cx:C,cy:C,r:39.5,fill:'none',stroke:'#378ADD','stroke-width':2.5});
+    for(var i=0;i<24;i++){
+      var a=i*Math.PI/12, c=Math.cos(a), s=Math.sin(a);
+      el('line',{x1:(C+5*c).toFixed(2),y1:(C+5*s).toFixed(2),x2:(C+38.5*c).toFixed(2),y2:(C+38.5*s).toFixed(2),
+                 stroke:'#378ADD','stroke-width':1.1,'stroke-linecap':'round'});
+    }
+    el('circle',{cx:C,cy:C,r:5,fill:'#378ADD'});
+  });
+
+  var track=document.getElementById('track'), vp=document.getElementById('viewport');
+  var slides=[].slice.call(track.children), N=slides.length;
+  var dotsEl=document.getElementById('dots'), count=document.getElementById('count');
+  var prev=document.getElementById('prev'), next=document.getElementById('next');
+  var cur=0, seen={0:true}, dots=[];
+
+  slides.forEach(function(_,i){
+    var b=document.createElement('button');
+    b.type='button'; b.className='dot'; b.setAttribute('aria-label','Go to slide '+(i+1));
+    b.appendChild(document.createElement('span'));
+    b.addEventListener('click',function(){go(i);});
+    dotsEl.appendChild(b); dots.push(b);
+  });
+
+  function place(dx){
+    track.style.transform='translateX(calc('+(-cur)+' * (100% + 12px) + '+(dx||0)+'px))';
+  }
+  function render(){
+    place(0);
+    slides.forEach(function(s,i){
+      var on=i===cur;
+      s.classList.toggle('active',on);
+      s.inert=!on; s.setAttribute('aria-hidden',on?'false':'true');
+    });
+    dots.forEach(function(d,i){
+      d.classList.toggle('current',i===cur);
+      d.classList.toggle('viewed',i!==cur && !!seen[i]);
+      if(i===cur) d.setAttribute('aria-current','step'); else d.removeAttribute('aria-current');
+    });
+    prev.disabled=cur===0; next.disabled=cur===N-1;
+    count.textContent=(cur+1)+' of '+N+' · swipe or tap the arrows';
+  }
+  function go(i){
+    i=Math.max(0,Math.min(N-1,i));
+    cur=i; seen[i]=true; render();
+  }
+  prev.addEventListener('click',function(){go(cur-1);});
+  next.addEventListener('click',function(){go(cur+1);});
+
+  document.addEventListener('keydown',function(e){
+    if(e.altKey||e.ctrlKey||e.metaKey) return;
+    if(e.key==='ArrowRight'){go(cur+1);e.preventDefault();}
+    else if(e.key==='ArrowLeft'){go(cur-1);e.preventDefault();}
+    else if(e.key==='Home'){go(0);e.preventDefault();}
+    else if(e.key==='End'){go(N-1);e.preventDefault();}
+  });
+
+  // Swipe (touch, pen and mouse), 40px threshold
+  var x0=0,y0=0,dx=0,tracking=false,dragging=false,pid=null;
+  vp.addEventListener('pointerdown',function(e){
+    if(e.pointerType==='mouse'&&e.button!==0) return;
+    tracking=true; dragging=false; dx=0; x0=e.clientX; y0=e.clientY; pid=e.pointerId;
+  });
+  vp.addEventListener('pointermove',function(e){
+    if(!tracking||e.pointerId!==pid) return;
+    var mx=e.clientX-x0, my=e.clientY-y0;
+    if(!dragging){
+      if(Math.abs(mx)>8&&Math.abs(mx)>Math.abs(my)){
+        dragging=true; track.style.transition='none'; vp.classList.add('dragging');
+        try{vp.setPointerCapture(pid);}catch(_){}
+      } else if(Math.abs(my)>10){ tracking=false; return; }
+    }
+    if(dragging){
+      dx=mx;
+      if((cur===0&&dx>0)||(cur===N-1&&dx<0)) dx*=0.3;
+      place(dx);
+    }
+  });
+  function end(){
+    if(!tracking) return;
+    tracking=false;
+    if(!dragging) return;
+    dragging=false; track.style.transition=''; vp.classList.remove('dragging');
+    if(dx<=-40) go(cur+1); else if(dx>=40) go(cur-1); else render();
+    dx=0;
+  }
+  vp.addEventListener('pointerup',end);
+  vp.addEventListener('pointercancel',end);
+  vp.addEventListener('lostpointercapture',end);
+
+  render();
+})();
+</script>
+</body>
+</html>
